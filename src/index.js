@@ -1116,7 +1116,8 @@ async function saveScalpingBacktestResult(symbol, result) {
     first_tick_at: result.first_tick_at, last_tick_at: result.last_tick_at,
     train_boundary_at: result.train_boundary_at,
     overall: result.overall, in_sample: result.in_sample,
-    out_of_sample: result.out_of_sample, assumptions: result.assumptions,
+    out_of_sample: result.out_of_sample,
+    assumptions: { ...result.assumptions, filter_experiments: result.filter_experiments || [] },
     warnings: result.warnings, trade_details: result.trades
   };
   const saved = await db("aiva_backtest_runs", {
