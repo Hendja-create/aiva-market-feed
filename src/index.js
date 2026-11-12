@@ -278,6 +278,20 @@ const server = http.createServer(async (req, res) => {
         lastError
       });
     }
+    if (url.pathname === "/api/autonomous-status") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const rows = await db("aiva_learning_state?symbol=eq." + encodeURIComponent(symbol) +
+        "&select=symbol,confidence_threshold,evaluated_directional,directional_accuracy,updated_at,last_cycle_at,last_decision&limit=1");
+      return send(res, 200, rows[0] || {
+        symbol,
+        confidence_threshold: adaptiveConfidenceThreshold,
+        evaluated_directional: 0,
+        directional_accuracy: null,
+        last_cycle_at: null,
+        last_decision: null
+      });
+    }
     if (url.pathname === "/api/quote") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
