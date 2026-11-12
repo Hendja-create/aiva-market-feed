@@ -117,6 +117,10 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
   const closed=candles.filter(c=>Date.parse(c.candle_at)<currentBucket);
   const forming=candles.find(c=>Date.parse(c.candle_at)===currentBucket);
   if(closed.length<55||!forming)return {status:"WAITING_FOR_COMPLETE_CANDLES",closed:candles.length,has_forming:Boolean(forming)};
+  const continuity=[...closed.slice(-54),forming];
+  if(continuity.some((bar,i)=>i>0&&Date.parse(bar.candle_at)-Date.parse(continuity[i-1].candle_at)!==300000)){
+    return {status:"WAITING_FOR_CONTIGUOUS_M5_CANDLES",checked:continuity.length};
+  }
   let stateRows=await db("aiva_inverse_demo_state?strategy_key=eq."+STRATEGY_KEY+"&symbol=eq."+encodeURIComponent(symbol)+"&select=*&limit=1");
   let state=stateRows[0];
   if(!state){
@@ -196,13 +200,13 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
       const next=closed[i+1]&&Date.parse(closed[i+1].candle_at)>Date.parse(signal.candle_at)?closed[i+1]:forming;
       if(source&&next){
         const direction=source==="BUY"?"SELL":"BUY",buy=direction==="BUY";
-        const spread=next.ask_open-next.bid_open,atrNow=a14[i];
+        const spread=Number(last.ask)-Number(last.bid),atrNow=a14[i];
         if(spread>0&&spread<=COSTS.spreadMax){
           const sl=Math.max(3,Math.min(8,atrNow*1.2)),tp=sl*1.5;
-          const entry=(buy?next.ask_open:next.bid_open)+(buy?COSTS.slippageEachSide:-COSTS.slippageEachSide);
+          const entry=(buy?Number(last.ask):Number(last.bid))+(buy?COSTS.slippageEachSide:-COSTS.slippageEachSide);
           const row=await db("aiva_inverse_demo_trades",{method:"POST",headers:{Prefer:"return=representation"},
             body:JSON.stringify({strategy_key:STRATEGY_KEY,symbol,source_signal_direction:source,direction,
-              signal_candle_at:signal.candle_at,entry_at:next.first_tick_at||next.candle_at,
+              signal_candle_at:signal.candle_at,entry_at:lastTickAt,
               entry_price:Number(entry.toFixed(4)),stop_price:Number((buy?entry-sl:entry+sl).toFixed(4)),
               target_price:Number((buy?entry+tp:entry-tp).toFixed(4)),atr_points:Number(atrNow.toFixed(4)),
               context:{source_strategy:"Keltner breakout EMA20 +/- 1.5 ATR",inversion:"BUY<->SELL",
