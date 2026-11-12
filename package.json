@@ -1,0 +1,9 @@
+{
+  "name": "aiva-market-feed",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22 <23" },
+  "scripts": { "start": "node src/index.js" },
+  "dependencies": { "socket.io-client": "4.8.1" }
+}
