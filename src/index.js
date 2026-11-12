@@ -584,7 +584,7 @@ async function loadBacktestTicks(symbol, maxRows = 10000) {
     .slice(-maxRows);
 }
 
-function runHistoricalBacktest(ticks) {
+function runHistoricalBacktest(ticks, confidenceThreshold = 0.65) {
   const stopLoss = Math.max(0.1, Number(process.env.DEMO_STOP_LOSS_POINTS || 5));
   const takeProfit = Math.max(0.1, Number(process.env.DEMO_TAKE_PROFIT_POINTS || 8));
   const horizon = 30, blockLength = 3, signalInterval = 60, trainBoundary = Math.floor(ticks.length * 0.7);
@@ -638,10 +638,10 @@ function runHistoricalBacktest(ticks) {
     const momentum = returns.slice(-10).reduce((sum, value) => sum + value, 0);
     let direction = null;
     if (spreadRatio <= 0.5 && riskScore < 0.55 &&
-        probabilityUp >= 0.65 && probabilityUp - probabilityDown >= 0.25 &&
+        probabilityUp >= confidenceThreshold && probabilityUp - probabilityDown >= 0.25 &&
         expectedMove > spread * 1.5 && momentum > 0) direction = "BUY";
     else if (spreadRatio <= 0.5 && riskScore < 0.55 &&
-        probabilityDown >= 0.65 && probabilityDown - probabilityUp >= 0.25 &&
+        probabilityDown >= confidenceThreshold && probabilityDown - probabilityUp >= 0.25 &&
         expectedMove < -spread * 1.5 && momentum < 0) direction = "SELL";
 
     if (!direction) { skippedSignals++; i += signalInterval; continue; }
@@ -705,6 +705,7 @@ function runHistoricalBacktest(ticks) {
     split: "70% chronologique / 30% chronologique",
     assumptions: {
       simulations_per_signal: 100,
+      confidence_threshold: confidenceThreshold,
       signal_interval_ticks: signalInterval,
       horizon_ticks: horizon,
       stop_loss_points: stopLoss,
@@ -736,9 +737,21 @@ async function runScheduledBacktest(symbol) {
       console.log("Scheduled backtest skipped: insufficient history", JSON.stringify({ symbol, available: ticks.length, required: 500 }));
       return;
     }
-    const result = runHistoricalBacktest(ticks);
+    const result = runHistoricalBacktest(ticks, 0.65);
+    // Compare thresholds on the same chronological data without changing the live trading threshold.
+    const thresholdSensitivity = [0.55, 0.60, 0.65, 0.70, 0.75].map(threshold => {
+      const candidate = threshold === 0.65 ? result : runHistoricalBacktest(ticks, threshold);
+      return {
+        confidence_threshold: threshold,
+        overall: candidate.overall,
+        out_of_sample: candidate.out_of_sample
+      };
+    });
     const warnings = [];
     if (ticks.length < 5000) warnings.push("Historique court : résultats exploratoires uniquement.");
+    if (thresholdSensitivity.every(item => item.out_of_sample.trades < 10)) {
+      warnings.push("Comparaison des seuils non concluante : moins de 10 transactions hors échantillon pour chaque seuil.");
+    }
     if (result.overall.trades < 30) warnings.push("Moins de 30 trades : échantillon trop faible pour conclure.");
     if (result.out_of_sample.trades < 10) warnings.push("Moins de 10 trades hors échantillon : validation indépendante insuffisante.");
     const row = {
@@ -751,7 +764,7 @@ async function runScheduledBacktest(symbol) {
       overall: result.overall,
       in_sample: result.in_sample,
       out_of_sample: result.out_of_sample,
-      assumptions: result.assumptions,
+      assumptions: { ...result.assumptions, threshold_sensitivity: thresholdSensitivity },
       warnings,
       trade_details: result.trades
     };
