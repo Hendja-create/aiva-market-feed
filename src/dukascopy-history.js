@@ -20,9 +20,9 @@ async function fetchSide(from, to, priceType) {
     batchSize: 5,
     pauseBetweenBatchesMs: 1200,
     retryCount: 3,
-    retryOnEmpty: true,
+    retryOnEmpty: false,
     pauseBetweenRetriesMs: 1500,
-    failAfterRetryCount: true,
+    failAfterRetryCount: false,
     useCache: true,
     cacheFolderPath: process.env.DUKASCOPY_CACHE_PATH || "/tmp/dukascopy-cache"
   });
