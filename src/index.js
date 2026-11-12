@@ -177,7 +177,7 @@ async function evaluatePendingAnalyses(symbol) {
       ? actualDirection === "UP"
       : run.decision === "SELL"
         ? actualDirection === "DOWN"
-        : actualDirection === "FLAT";
+        : null;
     await db("market_analysis_runs?id=eq." + encodeURIComponent(run.id), {
       method: "PATCH",
       headers: { Prefer: "return=minimal" },
@@ -193,16 +193,16 @@ async function evaluatePendingAnalyses(symbol) {
   }
 
   const history = await db("market_analysis_runs?symbol=eq." + encodeURIComponent(symbol) +
-    "&evaluated_at=not.is.null&select=prediction_correct&order=evaluated_at.desc&limit=100");
+    "&evaluated_at=not.is.null&decision=in.(BUY,SELL)&select=decision,prediction_correct&order=evaluated_at.desc&limit=100");
   const reviewed = history.length;
   const accuracy = reviewed ? history.filter(row => row.prediction_correct === true).length / reviewed : null;
-  if (reviewed >= 30) {
+  if (reviewed >= 30 && accuracy !== null) {
     if (accuracy < 0.50) adaptiveConfidenceThreshold = 0.75;
     else if (accuracy < 0.57) adaptiveConfidenceThreshold = 0.72;
     else if (accuracy > 0.65) adaptiveConfidenceThreshold = 0.65;
     else adaptiveConfidenceThreshold = 0.68;
   }
-  return { evaluated, reviewed, accuracy, confidenceThreshold: adaptiveConfidenceThreshold };
+  return { evaluated, reviewedDirectional: reviewed, accuracy, confidenceThreshold: adaptiveConfidenceThreshold };
 }
 
 async function runAutonomousCycle() {
