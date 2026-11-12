@@ -209,8 +209,20 @@ async function importHistoricalDaily(symbol) {
       endpoint.searchParams.set("start", cursor);
       endpoint.searchParams.set("end", chunkEnd);
       endpoint.searchParams.set("key", process.env.LIVE_RATES_API_KEY);
-      const response = await fetch(endpoint, { signal: AbortSignal.timeout(20000) });
-      if (!response.ok) throw new Error("Live-Rates historical HTTP " + response.status);
+      let response;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        response = await fetch(endpoint, { signal: AbortSignal.timeout(20000) });
+        if (response.status !== 429) break;
+        const retryHeader = Number(response.headers.get("retry-after"));
+        const waitMs = Number.isFinite(retryHeader) && retryHeader > 0
+          ? Math.min(300000, retryHeader * 1000)
+          : Math.min(300000, 60000 * (attempt + 1));
+        console.warn("Historical provider rate limit; resuming same batch after cooldown", JSON.stringify({
+          symbol, start: cursor, end: chunkEnd, attempt: attempt + 1, wait_ms: waitMs
+        }));
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+      }
+      if (!response?.ok) throw new Error("Live-Rates historical HTTP " + (response?.status || "network_error"));
       const payload = await response.json();
       if (payload?.error) throw new Error("Live-Rates historical: " + String(payload.error).slice(0, 160));
       const parsed = parseHistoricalSeries(payload);
@@ -235,7 +247,7 @@ async function importHistoricalDaily(symbol) {
         symbol, start: cursor, end: chunkEnd, rows: parsed.length, total_imported: imported
       }));
       cursor = addUtcDays(chunkEnd, 1);
-      if (cursor <= yesterday) await new Promise(resolve => setTimeout(resolve, 1100));
+      if (cursor <= yesterday) await new Promise(resolve => setTimeout(resolve, 6500));
     }
     historicalContextCache.delete(symbol);
     console.log("Historical daily import complete", JSON.stringify({ symbol, imported, requests, through: yesterday }));
@@ -244,6 +256,78 @@ async function importHistoricalDaily(symbol) {
   } finally {
     historicalImportRunning = false;
   }
+}
+
+async function runHistoricalDailyValidation(symbol) {
+  const rows = await db("aiva_historical_daily?symbol=eq." + encodeURIComponent(symbol) +
+    "&select=session_date,close&order=session_date.asc&limit=4000");
+  const daily = rows.map(row => ({ date: row.session_date, close: Number(row.close) }))
+    .filter(row => Number.isFinite(row.close) && row.close > 0);
+  if (daily.length < 180) {
+    return { available: false, observations: daily.length, required_observations: 180,
+      message: "Historique insuffisant pour une validation walk-forward fiable." };
+  }
+  const returns = daily.slice(1).map((row, i) => (row.close - daily[i].close) / daily[i].close);
+  const mean = values => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const std = values => {
+    if (values.length < 2) return 1e-8;
+    const m = mean(values);
+    return Math.max(1e-8, Math.sqrt(values.reduce((sum, value) => sum + (value - m) ** 2, 0) / (values.length - 1)));
+  };
+  const baseline = [], analogue = [];
+  // Each test date only sees analogues whose complete five-session outcome
+  // was already known before that test date. No future leakage.
+  for (let end = 180; end <= returns.length - 5; end++) {
+    const query = returns.slice(end - 5, end);
+    const scale = std(returns.slice(0, end));
+    const candidates = [];
+    for (let priorEnd = 10; priorEnd <= end - 5; priorEnd++) {
+      const sequence = returns.slice(priorEnd - 5, priorEnd);
+      let distance = 0;
+      for (let j = 0; j < 5; j++) distance += ((sequence[j] - query[j]) / scale) ** 2;
+      const forward = returns.slice(priorEnd, priorEnd + 5);
+      if (forward.length !== 5) continue;
+      candidates.push({ distance, outcome: forward.reduce((sum, value) => sum + value, 0) });
+    }
+    if (candidates.length < 30) continue;
+    candidates.sort((a, b) => a.distance - b.distance);
+    const nearest = candidates.slice(0, 30);
+    const analogueScore = mean(nearest.map(item => item.outcome));
+    const baselineScore = query.reduce((sum, value) => sum + value, 0);
+    const actual = returns.slice(end, end + 5).reduce((sum, value) => sum + value, 0);
+    if (Math.abs(actual) < 1e-8) continue;
+    baseline.push({ predicted: Math.sign(baselineScore), actual: Math.sign(actual) });
+    analogue.push({ predicted: Math.sign(analogueScore), actual: Math.sign(actual) });
+  }
+  const metrics = items => {
+    const directional = items.filter(item => item.predicted !== 0);
+    const correct = directional.filter(item => item.predicted === item.actual).length;
+    const up = directional.filter(item => item.actual > 0);
+    const down = directional.filter(item => item.actual < 0);
+    const recallUp = up.length ? up.filter(item => item.predicted > 0).length / up.length : null;
+    const recallDown = down.length ? down.filter(item => item.predicted < 0).length / down.length : null;
+    return {
+      evaluated: items.length, directional_predictions: directional.length,
+      coverage: items.length ? Number((directional.length / items.length).toFixed(4)) : null,
+      accuracy: directional.length ? Number((correct / directional.length).toFixed(4)) : null,
+      balanced_accuracy: recallUp !== null && recallDown !== null
+        ? Number(((recallUp + recallDown) / 2).toFixed(4)) : null
+    };
+  };
+  const base = metrics(baseline), similar = metrics(analogue);
+  return {
+    available: baseline.length >= 100,
+    symbol, horizon: "5 sessions", method: "walk_forward_nearest_30_patterns_vs_5d_momentum",
+    first_date: daily[0].date, last_date: daily[daily.length - 1].date,
+    observations: daily.length, baseline: base, historical_analogues: similar,
+    accuracy_delta: base.accuracy !== null && similar.accuracy !== null
+      ? Number((similar.accuracy - base.accuracy).toFixed(4)) : null,
+    leakage_control: "Each analogue's five-session outcome ends before the evaluated date.",
+    limitations: ["Daily directional research only; not a scalping backtest.",
+      "No spread, slippage, commission or execution simulation.",
+      "Historical accuracy does not establish future profitability.",
+      ...(baseline.length < 100 ? ["Fewer than 100 walk-forward test cases; evidence remains weak."] : [])]
+  };
 }
 
 async function getAnalysis(symbol) {
@@ -989,7 +1073,12 @@ const server = http.createServer(async (req, res) => {
         lastQuoteAt,
         lastError
       });
-    }    if (url.pathname === "/api/historical-status") {
+    }    if (url.pathname === "/api/historical-validation") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      return send(res, 200, await runHistoricalDailyValidation(symbol));
+    }
+    if (url.pathname === "/api/historical-status") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
       const [latest, earliest, context] = await Promise.all([
