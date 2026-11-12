@@ -71,6 +71,181 @@ async function verifyUserToken(token) {
   return Boolean(user && user.id);
 }
 
+
+
+// Historical daily closes are a separate market-regime/context layer.
+// They do not authorize or block intraday scalping entries until independently validated.
+const historicalContextCache = new Map();
+let historicalImportRunning = false;
+
+function utcDateString(date) { return date.toISOString().slice(0, 10); }
+function addUtcDays(dateString, days) {
+  const d = new Date(dateString + "T00:00:00.000Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return utcDateString(d);
+}
+function parseHistoricalSeries(payload) {
+  const rows = [];
+  const datePattern = /^\\d{4}-\\d{2}-\\d{2}/;
+  const numeric = value => {
+    if (value === null || value === undefined || value === "") return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const walk = value => {
+    if (Array.isArray(value)) { for (const item of value) walk(item); return; }
+    if (!value || typeof value !== "object") return;
+    const dateValue = value.date ?? value.day ?? value.datetime ?? value.timestamp ?? value.time;
+    if (typeof dateValue === "string" && datePattern.test(dateValue)) {
+      let close = null;
+      for (const key of ["close", "rate", "price", "value", "USD", "XAUUSD"]) {
+        close = numeric(value[key]);
+        if (close !== null) break;
+      }
+      if (close === null && value.rates && typeof value.rates === "object") {
+        close = numeric(value.rates.USD ?? value.rates.XAUUSD ?? value.rates["XAU/USD"]);
+      }
+      if (close !== null) rows.push({ session_date: dateValue.slice(0, 10), close });
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (datePattern.test(key)) {
+        const close = numeric(child && typeof child === "object"
+          ? (child.USD ?? child.close ?? child.rate ?? child.price ?? child.value ?? child.XAUUSD)
+          : child);
+        if (close !== null) rows.push({ session_date: key.slice(0, 10), close });
+      }
+      if (child && typeof child === "object") walk(child);
+    }
+  };
+  walk(payload);
+  return [...new Map(rows.map(row => [row.session_date, row])).values()]
+    .sort((x, y) => x.session_date.localeCompare(y.session_date));
+}
+async function getHistoricalContext(symbol) {
+  const cached = historicalContextCache.get(symbol);
+  if (cached && Date.now() - cached.at < 15 * 60 * 1000) return cached.value;
+  const rows = await db("aiva_historical_daily?symbol=eq." + encodeURIComponent(symbol) +
+    "&select=session_date,close&order=session_date.desc&limit=4000");
+  const daily = rows.slice().reverse().map(row => ({
+    date: row.session_date, close: Number(row.close)
+  })).filter(row => Number.isFinite(row.close) && row.close > 0);
+  if (daily.length < 30) {
+    return { available: false, observations: daily.length,
+      message: "Historique quotidien en cours de constitution ; contexte historique non utilisé." };
+  }
+  const returns = [];
+  for (let i = 1; i < daily.length; i++) returns.push((daily[i].close - daily[i - 1].close) / daily[i - 1].close);
+  const mean = values => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const std = values => {
+    if (values.length < 2) return 0;
+    const m = mean(values);
+    return Math.sqrt(values.reduce((sum, value) => sum + (value - m) ** 2, 0) / (values.length - 1));
+  };
+  const last5 = returns.slice(-5);
+  const last20 = returns.slice(-20);
+  const momentum5d = last5.reduce((sum, value) => sum + value, 0);
+  const momentum20d = last20.reduce((sum, value) => sum + value, 0);
+  const volatility20d = std(last20);
+  const baselineVolatility = std(returns.slice(-Math.min(250, returns.length)));
+  const regime = volatility20d > baselineVolatility * 1.5 ? "high_volatility"
+    : momentum20d > volatility20d * 1.5 ? "bullish"
+    : momentum20d < -volatility20d * 1.5 ? "bearish" : "range_or_mixed";
+
+  // Compare the latest five-session return sequence with older sequences.
+  // Leave a five-session gap and five future sessions to prevent target leakage.
+  const candidates = [];
+  const scale = Math.max(std(returns), 1e-8);
+  for (let end = 25; end <= returns.length - 10; end++) {
+    const sequence = returns.slice(end - 5, end);
+    let distance = 0;
+    for (let j = 0; j < 5; j++) distance += ((sequence[j] - last5[j]) / scale) ** 2;
+    const forward5d = returns.slice(end, end + 5).reduce((sum, value) => sum + value, 0);
+    candidates.push({ distance, forward5d });
+  }
+  candidates.sort((x, y) => x.distance - y.distance);
+  const matches = candidates.slice(0, 30);
+  const positive = matches.filter(item => item.forward5d > 0).length;
+  const negative = matches.filter(item => item.forward5d < 0).length;
+  const avgForward5d = mean(matches.map(item => item.forward5d));
+  const result = {
+    available: true, source: "Live-Rates historical daily close",
+    first_date: daily[0].date, last_date: daily[daily.length - 1].date,
+    observations: daily.length,
+    momentum_5d_pct: Number((momentum5d * 100).toFixed(3)),
+    momentum_20d_pct: Number((momentum20d * 100).toFixed(3)),
+    volatility_20d_pct: Number((volatility20d * 100).toFixed(3)),
+    regime,
+    similar_patterns: matches.length,
+    similar_patterns_up_5d: positive,
+    similar_patterns_down_5d: negative,
+    similar_patterns_flat_5d: matches.length - positive - negative,
+    historical_up_frequency: matches.length ? Number((positive / matches.length).toFixed(4)) : null,
+    average_forward_5d_pct: Number((avgForward5d * 100).toFixed(3)),
+    use_in_live_decision: false,
+    note: "Contexte quotidien informatif uniquement ; aucun filtre de scalping n'est modifié."
+  };
+  historicalContextCache.set(symbol, { at: Date.now(), value: result });
+  return result;
+}
+async function importHistoricalDaily(symbol) {
+  if (!process.env.LIVE_RATES_API_KEY || historicalImportRunning) return;
+  historicalImportRunning = true;
+  try {
+    const existing = await db("aiva_historical_daily?symbol=eq." + encodeURIComponent(symbol) +
+      "&select=session_date&order=session_date.desc&limit=1");
+    const yesterday = addUtcDays(utcDateString(new Date()), -1);
+    let cursor = existing.length ? addUtcDays(existing[0].session_date, 1) : "2016-01-01";
+    if (cursor > yesterday) {
+      console.log("Historical daily data already current", JSON.stringify({ symbol, through: existing[0]?.session_date || null }));
+      return;
+    }
+    let imported = 0, requests = 0;
+    while (cursor <= yesterday) {
+      const chunkEndCandidate = addUtcDays(cursor, 29);
+      const chunkEnd = chunkEndCandidate < yesterday ? chunkEndCandidate : yesterday;
+      const endpoint = new URL("https://www.live-rates.com/historical/series");
+      endpoint.searchParams.set("base", "XAU");
+      endpoint.searchParams.set("symbols", "USD");
+      endpoint.searchParams.set("start", cursor);
+      endpoint.searchParams.set("end", chunkEnd);
+      endpoint.searchParams.set("key", process.env.LIVE_RATES_API_KEY);
+      const response = await fetch(endpoint, { signal: AbortSignal.timeout(20000) });
+      if (!response.ok) throw new Error("Live-Rates historical HTTP " + response.status);
+      const payload = await response.json();
+      if (payload?.error) throw new Error("Live-Rates historical: " + String(payload.error).slice(0, 160));
+      const parsed = parseHistoricalSeries(payload);
+      if (!parsed.length && !(Array.isArray(payload) && payload.length === 0)) {
+        throw new Error("Format de série historique non reconnu pour " + cursor + " → " + chunkEnd +
+          " ; clés reçues: " + Object.keys(payload || {}).slice(0, 12).join(","));
+      }
+      if (parsed.length) {
+        const batch = parsed.map(row => ({
+          symbol, session_date: row.session_date, close: row.close,
+          source: "live-rates-historical", fetched_at: new Date().toISOString()
+        }));
+        await db("aiva_historical_daily?on_conflict=symbol,session_date", {
+          method: "POST",
+          headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+          body: JSON.stringify(batch)
+        });
+        imported += batch.length;
+      }
+      requests++;
+      console.log("Historical daily batch processed", JSON.stringify({
+        symbol, start: cursor, end: chunkEnd, rows: parsed.length, total_imported: imported
+      }));
+      cursor = addUtcDays(chunkEnd, 1);
+      if (cursor <= yesterday) await new Promise(resolve => setTimeout(resolve, 1100));
+    }
+    historicalContextCache.delete(symbol);
+    console.log("Historical daily import complete", JSON.stringify({ symbol, imported, requests, through: yesterday }));
+  } catch (error) {
+    console.error("Historical daily import failed", error instanceof Error ? error.message : String(error));
+  } finally {
+    historicalImportRunning = false;
+  }
+}
+
 async function getAnalysis(symbol) {
   const rows = await db("market_quote_ticks?symbol=eq." + encodeURIComponent(symbol) +
     "&select=bid,ask,mid,spread,received_at&order=received_at.desc&limit=300");
@@ -183,11 +358,12 @@ async function getAnalysis(symbol) {
     };
     rationale = "NO_TRADE : " + blockingReasons.map(key => labels[key]).join(", ") + ".";
   }
+  const historicalContext = await getHistoricalContext(symbol).catch(error => ({ available: false, message: "Contexte historique indisponible: " + String(error).slice(0, 120) }));
   const result = {
     symbol, decision, simulations: 100, confidence: Number(confidence.toFixed(4)),
     probability_up: Number(probabilityUp.toFixed(4)), probability_down: Number(probabilityDown.toFixed(4)), probability_flat: Number(probabilityFlat.toFixed(4)),
     expected_move: Number(expectedMove.toFixed(4)), risk_score: Number(riskScore.toFixed(4)),
-    rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, block_length: blockLength, confidence_threshold: adaptiveConfidenceThreshold, recent_momentum_10: Number(recentMomentum.toFixed(8)), decision_diagnostics: decisionDiagnostics, model: "block_bootstrap_monte_carlo_v2" },
+    rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, block_length: blockLength, confidence_threshold: adaptiveConfidenceThreshold, recent_momentum_10: Number(recentMomentum.toFixed(8)), decision_diagnostics: decisionDiagnostics, historical_context: historicalContext, model: "block_bootstrap_monte_carlo_v2" },
     scenarios: simulations, generated_at: new Date().toISOString()
   };
   const saved = await db("market_analysis_runs", {
@@ -426,8 +602,7 @@ async function manageDemoTrade(symbol, analysis) {
 async function getDemoHistory(period, symbol) {
   const now = new Date();
   const days = period === "monthly" ? 370 : period === "weekly" ? 100 : 31;
-  const from = new Date(now.getTime() - days * 86400000).toISOString();
-  const [closed, opened, analyses] = await Promise.all([
+  const from = new Date(now.getTime() - days * 86400000).toISOString();  const [closed, opened, analyses] = await Promise.all([
     db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) + "&status=eq.CLOSED&opened_at=gte." + encodeURIComponent(from) +
       "&select=direction,entry_price,exit_price,pnl_points,opened_at,closed_at&order=closed_at.desc&limit=2000"),
     db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) + "&status=eq.OPEN&select=id,direction,entry_price,opened_at&order=opened_at.desc&limit=100"),
@@ -814,7 +989,23 @@ const server = http.createServer(async (req, res) => {
         lastQuoteAt,
         lastError
       });
-    }    if (url.pathname === "/api/autonomous-status") {
+    }    if (url.pathname === "/api/historical-status") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const [latest, earliest, context] = await Promise.all([
+        db("aiva_historical_daily?symbol=eq." + encodeURIComponent(symbol) + "&select=session_date,close&order=session_date.desc&limit=1"),
+        db("aiva_historical_daily?symbol=eq." + encodeURIComponent(symbol) + "&select=session_date&order=session_date.asc&limit=1"),
+        getHistoricalContext(symbol)
+      ]);
+      return send(res, 200, {
+        symbol, source: "Live-Rates historical daily close",
+        first_date: earliest[0]?.session_date || null,
+        last_date: latest[0]?.session_date || null,
+        latest_close: latest[0] ? Number(latest[0].close) : null,
+        context, backfill_running: historicalImportRunning
+      });
+    }
+    if (url.pathname === "/api/autonomous-status") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
       const [rows, recentAnalyses] = await Promise.all([
@@ -846,8 +1037,7 @@ const server = http.createServer(async (req, res) => {
           confidence: latestAnalysis.confidence,
           probability_up: latestAnalysis.probability_up,
           probability_down: latestAnalysis.probability_down,
-          expected_move: latestAnalysis.expected_move,
-          risk_score: latestAnalysis.risk_score,
+          expected_move: latestAnalysis.expected_move,          risk_score: latestAnalysis.risk_score,
           rationale: latestAnalysis.rationale,
           diagnostics: latestAnalysis.features?.decision_diagnostics || null,
           created_at: latestAnalysis.created_at
@@ -1020,3 +1210,7 @@ const backtestIntervalMs = Math.max(3600000, Number(process.env.BACKTEST_INTERVA
 setTimeout(() => { for (const symbol of symbols) runScheduledBacktest(symbol); }, 90000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledBacktest(symbol); }, backtestIntervalMs);
 console.log("Scheduled historical backtest enabled", backtestIntervalMs, "ms");
+const historicalImportIntervalMs = 24 * 60 * 60 * 1000;
+setTimeout(() => { for (const symbol of symbols) importHistoricalDaily(symbol); }, 45000).unref();
+setInterval(() => { for (const symbol of symbols) importHistoricalDaily(symbol); }, historicalImportIntervalMs);
+console.log("Historical daily import scheduler enabled", historicalImportIntervalMs, "ms");
