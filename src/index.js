@@ -86,7 +86,7 @@ function addUtcDays(dateString, days) {
 }
 function parseHistoricalSeries(payload) {
   const rows = [];
-  const datePattern = /^\\d{4}-\\d{2}-\\d{2}/;
+  const datePattern = /^\d{4}-\d{2}-\d{2}/;
   const numeric = value => {
     if (value === null || value === undefined || value === "") return null;
     const n = Number(value);
