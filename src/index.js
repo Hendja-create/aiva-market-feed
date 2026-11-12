@@ -4,6 +4,7 @@ import { importDukascopyM1Chunk, importDukascopyM5Chunk } from "./dukascopy-hist
 import { runM1ScalpingBacktest } from "./scalping-backtest.js";
 import { runVolatilityReversalBacktest } from "./volatility-reversal-backtest.js";
 import { runLiquiditySweepBacktest } from "./liquidity-sweep-backtest.js";
+import { runStrategyTournament } from "./strategy-tournament.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -1135,6 +1136,45 @@ async function saveScalpingBacktestResult(symbol, result) {
   return saved?.[0]?.id || null;
 }
 
+let scheduledStrategyTournamentRunning = false;
+async function runScheduledStrategyTournament(symbol) {
+  if (scheduledStrategyTournamentRunning) return;
+  scheduledStrategyTournamentRunning = true;
+  try {
+    const result = await runStrategyTournament(db, symbol, "M5", 80000);
+    if (!result.available) {
+      console.log("Strategy tournament waiting for history", JSON.stringify(result));
+      return;
+    }
+    for (const item of result.results) {
+      const saved = await db("aiva_backtest_runs", {
+        method: "POST", headers: { Prefer: "return=representation" },
+        body: JSON.stringify({
+          symbol, method: item.method, data_points: result.data_points,
+          first_tick_at: result.first_tick_at, last_tick_at: result.last_tick_at,
+          train_boundary_at: result.train_boundary_at,
+          overall: item.overall, in_sample: item.in_sample, out_of_sample: item.out_of_sample,
+          assumptions: { ...item.assumptions, config: item.config, experiment_group: "independent_strategy_tournament_v1",
+            tournament_method: result.method, configurations_tested: result.configurations_tested },
+          warnings: item.warnings, trade_details: item.trades
+        })
+      });
+      console.log("Strategy tournament result saved", JSON.stringify({
+        symbol, strategy: item.name, overall: item.overall, out_of_sample: item.out_of_sample,
+        by_direction: item.by_direction, run_id: saved?.[0]?.id || null
+      }));
+    }
+    console.log("Strategy tournament completed", JSON.stringify({
+      symbol, configurations_tested: result.configurations_tested,
+      ranking: result.results.map(x => ({name:x.name,oos:x.out_of_sample}))
+    }));
+  } catch (error) {
+    console.error("Strategy tournament failed", error instanceof Error ? error.message : String(error));
+  } finally {
+    scheduledStrategyTournamentRunning = false;
+  }
+}
+
 let scheduledLiquiditySweepRunning = false;
 async function runScheduledLiquiditySweep(symbol) {
   if (scheduledLiquiditySweepRunning) return;
@@ -1289,6 +1329,39 @@ const server = http.createServer(async (req, res) => {
         })
       });
       return send(res, 200, { ...result, run_id: saved?.[0]?.id || null });
+    }
+    if (url.pathname === "/api/strategy-tournament") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const timeframe = (url.searchParams.get("timeframe") || "M5").toUpperCase();
+      if (timeframe !== "M5") return send(res, 400, { error: "research_timeframe_must_be_M5" });
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
+      const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+      const rateKey = "strategy-tournament:" + clientIp;
+      const previousRequest = analysisRateLimit.get(rateKey) || 0;
+      const elapsed = Date.now() - previousRequest;
+      if (elapsed < 900000) return send(res, 429, { error: "strategy_test_rate_limited", retry_after_ms: 900000 - elapsed });
+      analysisRateLimit.set(rateKey, Date.now());
+      const result = await runStrategyTournament(db, symbol, timeframe, 80000);
+      if (!result.available) return send(res, 422, result);
+      for (const item of result.results) {
+        const saved = await db("aiva_backtest_runs", {
+          method: "POST", headers: { Prefer: "return=representation" },
+          body: JSON.stringify({
+            symbol, method: item.method, data_points: result.data_points,
+            first_tick_at: result.first_tick_at, last_tick_at: result.last_tick_at,
+            train_boundary_at: result.train_boundary_at,
+            overall: item.overall, in_sample: item.in_sample, out_of_sample: item.out_of_sample,
+            assumptions: { ...item.assumptions, config: item.config, experiment_group: "independent_strategy_tournament_v1",
+              tournament_method: result.method, configurations_tested: result.configurations_tested },
+            warnings: item.warnings, trade_details: item.trades
+          })
+        });
+        item.run_id = saved?.[0]?.id || null;
+      }
+      return send(res, 200, result);
     }
     if (url.pathname === "/api/liquidity-sweep-backtest") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
@@ -1728,6 +1801,10 @@ const volatilityReversalIntervalMs = Math.max(60 * 60 * 1000, Number(process.env
 setTimeout(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, 15000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, volatilityReversalIntervalMs);
 console.log("Experimental volatility reversal research scheduler enabled", volatilityReversalIntervalMs, "ms");
+const strategyTournamentIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.STRATEGY_TOURNAMENT_INTERVAL_MS || 21600000));
+setTimeout(() => { for (const symbol of symbols) runScheduledStrategyTournament(symbol); }, 120000).unref();
+setInterval(() => { for (const symbol of symbols) runScheduledStrategyTournament(symbol); }, strategyTournamentIntervalMs);
+console.log("Independent strategy tournament scheduler enabled", strategyTournamentIntervalMs, "ms");
 const liquiditySweepIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.LIQUIDITY_SWEEP_INTERVAL_MS || 21600000));
 setTimeout(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, 45000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, liquiditySweepIntervalMs);
