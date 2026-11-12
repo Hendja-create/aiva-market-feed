@@ -474,6 +474,191 @@ async function runAutonomousCycle() {
   }
 }
 
+
+function seededRandom(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6D2B79F5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function summarizeBacktestTrades(trades) {
+  let equity = 0, peak = 0, maxDrawdown = 0, currentLossStreak = 0, maxLossStreak = 0;
+  let grossProfit = 0, grossLoss = 0;
+  for (const trade of trades) {
+    equity += trade.pnl_points;
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, peak - equity);
+    if (trade.pnl_points > 0) {
+      grossProfit += trade.pnl_points;
+      currentLossStreak = 0;
+    } else if (trade.pnl_points < 0) {
+      grossLoss += Math.abs(trade.pnl_points);
+      currentLossStreak++;
+      maxLossStreak = Math.max(maxLossStreak, currentLossStreak);
+    } else {
+      currentLossStreak = 0;
+    }
+  }
+  const wins = trades.filter(t => t.pnl_points > 0).length;
+  const losses = trades.filter(t => t.pnl_points < 0).length;
+  const net = trades.reduce((sum, t) => sum + t.pnl_points, 0);
+  return {
+    trades: trades.length,
+    wins,
+    losses,
+    breakeven: trades.length - wins - losses,
+    win_rate: trades.length ? Number((wins / trades.length).toFixed(4)) : null,
+    net_pnl_points: Number(net.toFixed(4)),
+    gross_profit_points: Number(grossProfit.toFixed(4)),
+    gross_loss_points: Number(grossLoss.toFixed(4)),
+    profit_factor: grossLoss > 0 ? Number((grossProfit / grossLoss).toFixed(4)) : null,
+    expectancy_points: trades.length ? Number((net / trades.length).toFixed(4)) : null,
+    max_drawdown_points: Number(maxDrawdown.toFixed(4)),
+    max_consecutive_losses: maxLossStreak
+  };
+}
+
+async function loadBacktestTicks(symbol, maxRows = 10000) {
+  const all = [];
+  for (let offset = 0; offset < maxRows; offset += 1000) {
+    const page = await db("market_quote_ticks?symbol=eq." + encodeURIComponent(symbol) +
+      "&select=bid,ask,mid,spread,received_at&order=received_at.asc&limit=1000&offset=" + offset);
+    all.push(...page);
+    if (page.length < 1000) break;
+  }
+  return all.slice(-maxRows).filter(t =>
+    Number.isFinite(Number(t.bid)) && Number.isFinite(Number(t.ask)) &&
+    Number.isFinite(Number(t.mid)) && Number(t.ask) >= Number(t.bid)
+  );
+}
+
+function runHistoricalBacktest(ticks) {
+  const stopLoss = Math.max(0.1, Number(process.env.DEMO_STOP_LOSS_POINTS || 5));
+  const takeProfit = Math.max(0.1, Number(process.env.DEMO_TAKE_PROFIT_POINTS || 8));
+  const horizon = 30, blockLength = 3, signalInterval = 60, trainBoundary = Math.floor(ticks.length * 0.7);
+  const trades = [];
+  let skippedSignals = 0;
+  let i = 300;
+
+  while (i + horizon + 1 < ticks.length) {
+    const window = ticks.slice(Math.max(0, i - 299), i + 1);
+    const prices = window.map(t => Number(t.mid));
+    const returns = [];
+    for (let k = 1; k < prices.length; k++) {
+      if (prices[k - 1] > 0) returns.push((prices[k] - prices[k - 1]) / prices[k - 1]);
+    }
+    if (returns.length < 30) { i += signalInterval; continue; }
+
+    const current = Number(ticks[i].mid);
+    const spread = Number(ticks[i].ask) - Number(ticks[i].bid);
+    const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+    const variance = returns.length > 1
+      ? returns.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (returns.length - 1)
+      : 0;
+    const sigma = Math.sqrt(variance);
+    const random = seededRandom((i * 2654435761) >>> 0);
+    let up = 0, down = 0, flat = 0, sumMove = 0, adverse = 0;
+    for (let s = 0; s < 100; s++) {
+      let price = current, pathHigh = current, pathLow = current;
+      for (let step = 0; step < horizon;) {
+        const startIndex = Math.floor(random() * returns.length);
+        for (let j = 0; j < blockLength && step < horizon; j++, step++) {
+          price *= 1 + returns[(startIndex + j) % returns.length];
+          pathHigh = Math.max(pathHigh, price);
+          pathLow = Math.min(pathLow, price);
+        }
+      }
+      const move = price - current;
+      const maxAdverse = move >= 0 ? current - pathLow : pathHigh - current;
+      sumMove += move;
+      if (move > spread) up++;
+      else if (move < -spread) down++;
+      else flat++;
+      if (maxAdverse > Math.max(spread * 8, current * sigma * Math.sqrt(horizon) * 2.5)) adverse++;
+    }
+    const probabilityUp = up / 100, probabilityDown = down / 100;
+    const expectedMove = sumMove / 100;
+    const expectedRange = current * sigma * Math.sqrt(horizon);
+    const spreadRatio = expectedRange > 0 ? spread / expectedRange : 1;
+    const riskScore = Math.min(1, (adverse / 100) * 0.6 + Math.min(1, spreadRatio) * 0.4);
+    const momentum = returns.slice(-10).reduce((sum, value) => sum + value, 0);
+    let direction = null;
+    if (spreadRatio <= 0.5 && riskScore < 0.55 &&
+        probabilityUp >= 0.65 && probabilityUp - probabilityDown >= 0.25 &&
+        expectedMove > spread * 1.5 && momentum > 0) direction = "BUY";
+    else if (spreadRatio <= 0.5 && riskScore < 0.55 &&
+        probabilityDown >= 0.65 && probabilityDown - probabilityUp >= 0.25 &&
+        expectedMove < -spread * 1.5 && momentum < 0) direction = "SELL";
+
+    if (!direction) { skippedSignals++; i += signalInterval; continue; }
+
+    const entryIndex = i + 1;
+    const entry = Number(direction === "BUY" ? ticks[entryIndex].ask : ticks[entryIndex].bid);
+    let exitIndex = entryIndex + horizon;
+    let exitPrice = Number(direction === "BUY" ? ticks[exitIndex].bid : ticks[exitIndex].ask);
+    let exitReason = "Horizon de 30 cotations";
+    for (let j = entryIndex + 1; j <= entryIndex + horizon; j++) {
+      const executable = Number(direction === "BUY" ? ticks[j].bid : ticks[j].ask);
+      const pnl = (direction === "BUY" ? 1 : -1) * (executable - entry);
+      if (pnl <= -stopLoss) {
+        exitIndex = j; exitPrice = executable; exitReason = "Stop-loss"; break;
+      }
+      if (pnl >= takeProfit) {
+        exitIndex = j; exitPrice = executable; exitReason = "Take-profit"; break;
+      }
+    }
+    const pnl = (direction === "BUY" ? 1 : -1) * (exitPrice - entry);
+    trades.push({
+      direction,
+      entry_time: ticks[entryIndex].received_at,
+      exit_time: ticks[exitIndex].received_at,
+      entry_price: Number(entry.toFixed(4)),
+      exit_price: Number(exitPrice.toFixed(4)),
+      pnl_points: Number(pnl.toFixed(4)),
+      exit_reason: exitReason,
+      sample: entryIndex < trainBoundary ? "in_sample" : "out_of_sample"
+    });
+    i = Math.max(i + signalInterval, exitIndex);
+  }
+
+  const inSample = trades.filter(t => t.sample === "in_sample");
+  const outOfSample = trades.filter(t => t.sample === "out_of_sample");
+  const first = ticks[0]?.received_at || null;
+  const last = ticks[ticks.length - 1]?.received_at || null;
+  return {
+    method: "walk_forward_block_bootstrap_monte_carlo",
+    model: "block_bootstrap_monte_carlo_v2",
+    symbol: "XAUUSD",
+    data_points: ticks.length,
+    first_tick_at: first,
+    last_tick_at: last,
+    train_boundary_at: ticks[trainBoundary]?.received_at || null,
+    split: "70% chronologique / 30% chronologique",
+    assumptions: {
+      simulations_per_signal: 100,
+      signal_interval_ticks: signalInterval,
+      horizon_ticks: horizon,
+      stop_loss_points: stopLoss,
+      take_profit_points: takeProfit,
+      entry_exit_use_bid_ask: true,
+      spread_included: true,
+      commissions: "non incluses",
+      slippage: "non inclus",
+      random_seed: "déterministe par index de cotation"
+    },
+    signals_without_entry: skippedSignals,
+    overall: summarizeBacktestTrades(trades),
+    in_sample: summarizeBacktestTrades(inSample),
+    out_of_sample: summarizeBacktestTrades(outOfSample),
+    trades: trades.slice(-100)
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
@@ -530,6 +715,28 @@ const server = http.createServer(async (req, res) => {
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
       const rows = await db("market_quotes?symbol=eq." + encodeURIComponent(symbol) + "&select=symbol,bid,ask,mid,spread,provider_timestamp,received_at,source,connection_status,latency_ms&limit=1");
       return send(res, 200, rows[0] || { error: "quote_not_found" });
+    }
+    if (url.pathname === "/api/backtest") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
+      const ticks = await loadBacktestTicks(symbol, 10000);
+      if (ticks.length < 500) {
+        return send(res, 422, {
+          error: "insufficient_history",
+          required_ticks: 500,
+          available_ticks: ticks.length,
+          message: "Il faut au moins 500 cotations pour lancer ce backtest exploratoire."
+        });
+      }
+      const result = runHistoricalBacktest(ticks);
+      result.symbol = symbol;
+      result.warning = ticks.length < 5000
+        ? "Historique encore court : résultats exploratoires, pas une validation statistique."
+        : "Backtest historique indicatif : vérifier sur une période indépendante plus longue.";
+      return send(res, 200, result);
     }
     if (url.pathname === "/api/analysis") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
