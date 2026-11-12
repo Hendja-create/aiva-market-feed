@@ -1067,41 +1067,42 @@ async function runScheduledBacktest(symbol) {
   }
 }
 
+async function saveScalpingBacktestResult(symbol, result) {
+  if (!result.available) {
+    console.log(result.timeframe + " scalping backtest skipped", JSON.stringify(result));
+    return null;
+  }
+  const row = {
+    symbol, method: result.method, data_points: result.data_points,
+    first_tick_at: result.first_tick_at, last_tick_at: result.last_tick_at,
+    train_boundary_at: result.train_boundary_at,
+    overall: result.overall, in_sample: result.in_sample,
+    out_of_sample: result.out_of_sample, assumptions: result.assumptions,
+    warnings: result.warnings, trade_details: result.trades
+  };
+  const saved = await db("aiva_backtest_runs", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify(row)
+  });
+  console.log(result.timeframe + " scalping backtest saved", JSON.stringify({
+    symbol, data_points: result.data_points, overall: result.overall,
+    out_of_sample: result.out_of_sample, warnings: result.warnings,
+    run_id: saved?.[0]?.id
+  }));
+  return saved?.[0]?.id || null;
+}
+
 async function runScheduledScalpingBacktest(symbol) {
   if (scheduledScalpingBacktestRunning) return;
   scheduledScalpingBacktestRunning = true;
   try {
-    const result = await runM1ScalpingBacktest(db, symbol, 0.65, 80000);
-    if (!result.available) {
-      console.log("M1 scalping backtest skipped", JSON.stringify(result));
-      return;
+    for (const timeframe of ["M1", "M5"]) {
+      const result = await runM1ScalpingBacktest(db, symbol, 0.65, 80000, timeframe);
+      await saveScalpingBacktestResult(symbol, result);
     }
-    const row = {
-      symbol,
-      method: result.method,
-      data_points: result.data_points,
-      first_tick_at: result.first_tick_at,
-      last_tick_at: result.last_tick_at,
-      train_boundary_at: result.train_boundary_at,
-      overall: result.overall,
-      in_sample: result.in_sample,
-      out_of_sample: result.out_of_sample,
-      assumptions: result.assumptions,
-      warnings: result.warnings,
-      trade_details: result.trades
-    };
-    const saved = await db("aiva_backtest_runs", {
-      method: "POST",
-      headers: { Prefer: "return=representation" },
-      body: JSON.stringify(row)
-    });
-    console.log("M1 scalping backtest saved", JSON.stringify({
-      symbol, data_points: result.data_points,
-      overall: result.overall, out_of_sample: result.out_of_sample,
-      warnings: result.warnings, run_id: saved?.[0]?.id
-    }));
   } catch (error) {
-    console.error("M1 scalping backtest failed", error instanceof Error ? error.message : String(error));
+    console.error("Scalping comparison failed", error instanceof Error ? error.message : String(error));
   } finally {
     scheduledScalpingBacktestRunning = false;
   }
@@ -1265,6 +1266,37 @@ const server = http.createServer(async (req, res) => {
       });
       return send(res, 200, { ...result, run_id: saved?.[0]?.id || null });
     }
+    if (url.pathname === "/api/scalping-comparison") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
+      const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+      const rateKey = "scalping-comparison:" + clientIp;
+      const previousRequest = analysisRateLimit.get(rateKey) || 0;
+      const elapsed = Date.now() - previousRequest;
+      if (elapsed < 60000) return send(res, 429, { error: "backtest_rate_limited", retry_after_ms: 60000 - elapsed });
+      analysisRateLimit.set(rateKey, Date.now());
+
+      const results = {};
+      for (const timeframe of ["M1", "M5"]) {
+        results[timeframe] = await runM1ScalpingBacktest(db, symbol, 0.65, 80000, timeframe);
+        if (results[timeframe].available) {
+          results[timeframe].run_id = await saveScalpingBacktestResult(symbol, results[timeframe]);
+        }
+      }
+      const comparable = results.M1.available && results.M5.available &&
+        results.M1.first_tick_at === results.M5.first_tick_at &&
+        results.M1.last_tick_at === results.M5.last_tick_at;
+      return send(res, 200, {
+        symbol, comparison_valid: comparable,
+        comparison_note: comparable
+          ? "M1 et M5 couvrent exactement les mêmes bornes temporelles."
+          : "Les bornes temporelles ou la disponibilité diffèrent ; ne pas comparer les performances directement.",
+        results
+      });
+    }
     if (url.pathname === "/api/backtest-history") {
       const authHeader = String(req.headers.authorization || "");
       const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
@@ -1420,4 +1452,4 @@ console.log("Dukascopy M1 history importer enabled", historicalM1ImportIntervalM
 const scalpingBacktestIntervalMs = Math.max(30 * 60 * 1000, Number(process.env.SCALPING_BACKTEST_INTERVAL_MS || 21600000));
 setTimeout(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, 20 * 60 * 1000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, scalpingBacktestIntervalMs);
-console.log("M1 scalping backtest scheduler enabled", scalpingBacktestIntervalMs, "ms");
+console.log("M1/M5 scalping comparison scheduler enabled", scalpingBacktestIntervalMs, "ms");
