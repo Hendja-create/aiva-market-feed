@@ -64,7 +64,7 @@ function validCandle(row) {
     Number.isFinite(new Date(row.candle_at).getTime());
 }
 
-export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThreshold = 0.65, maxRows = 80000) {
+export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThreshold = 0.65, maxRows = 80000, timeframe = "M1") {
   const pageSize = 1000;
   const concurrency = 10;
   const newestFirst = [];
@@ -89,22 +89,61 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
     if (pages.some(page => page.length < pageSize) || newestFirst.length >= maxRows) break;
   }
 
-  const candles = newestFirst.filter(validCandle).sort((a, b) =>
+  const rawCandles = newestFirst.filter(validCandle).sort((a, b) =>
     new Date(a.candle_at).getTime() - new Date(b.candle_at).getTime()
   ).slice(-maxRows);
 
+  let candles = rawCandles;
+  if (timeframe === "M5") {
+    const buckets = new Map();
+    for (const row of rawCandles) {
+      const timestamp = new Date(row.candle_at).getTime();
+      const bucket = Math.floor(timestamp / 300000) * 300000;
+      if (!buckets.has(bucket)) buckets.set(bucket, []);
+      buckets.get(bucket).push(row);
+    }
+    candles = [];
+    for (const [bucket, rows] of buckets) {
+      rows.sort((a, b) => new Date(a.candle_at).getTime() - new Date(b.candle_at).getTime());
+      if (rows.length !== 5) continue;
+      let consecutive = true;
+      for (let i = 1; i < rows.length; i++) {
+        if (new Date(rows[i].candle_at).getTime() - new Date(rows[i - 1].candle_at).getTime() !== 60000) {
+          consecutive = false;
+          break;
+        }
+      }
+      if (!consecutive || new Date(rows[0].candle_at).getTime() !== bucket) continue;
+      const first = rows[0], last = rows[4];
+      candles.push({
+        candle_at: new Date(bucket).toISOString(),
+        bid_open: Number(first.bid_open),
+        bid_high: Math.max(...rows.map(r => Number(r.bid_high))),
+        bid_low: Math.min(...rows.map(r => Number(r.bid_low))),
+        bid_close: Number(last.bid_close),
+        ask_open: Number(first.ask_open),
+        ask_high: Math.max(...rows.map(r => Number(r.ask_high))),
+        ask_low: Math.min(...rows.map(r => Number(r.ask_low))),
+        ask_close: Number(last.ask_close),
+        spread_close: Number(last.ask_close) - Number(last.bid_close)
+      });
+    }
+  }
+
   if (candles.length < 5000) {
     return {
-      available: false, symbol, timeframe: "M1", data_points: candles.length,
+      available: false, symbol, timeframe, data_points: candles.length,
       required_data_points: 5000,
       warning: "Historique M1 encore insuffisant pour un backtest exploitable."
     };
   }
 
-  const lookback = 300;
-  const horizon = 5;
-  const blockLength = 3;
-  const signalInterval = 5;
+  const lookback = timeframe === "M5" ? 60 : 300;
+  const horizon = timeframe === "M5" ? 1 : 5;
+  const blockLength = timeframe === "M5" ? 1 : 3;
+  const signalInterval = timeframe === "M5" ? 1 : 5;
+  const barIntervalMs = timeframe === "M5" ? 300000 : 60000;
+  const allowedGapMs = barIntervalMs * 2;
   const trainBoundary = Math.floor(candles.length * 0.7);
   const stopLoss = Math.max(0.1, Number(process.env.SCALPING_STOP_LOSS_POINTS || 5));
   const takeProfit = Math.max(0.1, Number(process.env.SCALPING_TAKE_PROFIT_POINTS || 8));
@@ -117,7 +156,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
 
   for (let i = 1; i < candles.length; i++) {
     const gap = new Date(candles[i].candle_at).getTime() - new Date(candles[i - 1].candle_at).getTime();
-    if (gap > 120000 || gap <= 0) continue;
+    if (gap > allowedGapMs || gap <= 0) continue;
     const previousMid = (Number(candles[i - 1].bid_close) + Number(candles[i - 1].ask_close)) / 2;
     const currentMid = (Number(candles[i].bid_close) + Number(candles[i].ask_close)) / 2;
     if (previousMid > 0) returns[i] = (currentMid - previousMid) / previousMid;
@@ -182,7 +221,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
     let contiguous = true;
     for (let j = entryIndex; j <= lastIndex; j++) {
       const gap = new Date(candles[j].candle_at).getTime() - new Date(candles[j - 1].candle_at).getTime();
-      if (gap > 120000 || gap <= 0) { contiguous = false; break; }
+      if (gap > allowedGapMs || gap <= 0) { contiguous = false; break; }
     }
     if (!contiguous) { skippedSignals++; continue; }
 
@@ -265,7 +304,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
   const inSample = trades.filter(t => t.sample === "in_sample");
   const outOfSample = trades.filter(t => t.sample === "out_of_sample");
   const warnings = [];
-  if (candles.length < 20000) warnings.push("Historique M1 inférieur à 20 000 bougies : résultat exploratoire.");
+  if (candles.length < (timeframe === "M5" ? 5000 : 20000)) warnings.push(`Historique ${timeframe} encore limité : résultat exploratoire.`);
   if (trades.length < 30) warnings.push("Moins de 30 transactions : échantillon trop faible pour conclure.");
   if (outOfSample.length < 10) warnings.push("Moins de 10 transactions hors échantillon : validation indépendante insuffisante.");
   if (trades.some(t => t.same_bar_ambiguity)) warnings.push("Quand SL et TP sont touchés dans la même bougie, le stop est compté en premier.");
@@ -275,8 +314,8 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
   return {
     available: true,
     symbol,
-    timeframe: "M1",
-    method: "m1_scalping_block_bootstrap_monte_carlo_bid_ask_v1",
+    timeframe,
+    method: `${timeframe.toLowerCase()}_scalping_block_bootstrap_monte_carlo_bid_ask_v1`,
     model: "block_bootstrap_monte_carlo_v1",
     data_points: candles.length,
     first_tick_at: candles[0].candle_at,
@@ -289,6 +328,8 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
       confidence_threshold: confidenceThreshold,
       lookback_candles: lookback,
       horizon_candles: horizon,
+      horizon_minutes: horizon * (timeframe === "M5" ? 5 : 1),
+      lookback_minutes: lookback * (timeframe === "M5" ? 5 : 1),
       block_length: blockLength,
       signal_interval_candles: signalInterval,
       stop_loss_points: stopLoss,
