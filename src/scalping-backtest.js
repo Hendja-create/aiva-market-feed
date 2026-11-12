@@ -64,38 +64,44 @@ function validCandle(row) {
     Number.isFinite(new Date(row.candle_at).getTime());
 }
 
-export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThreshold = 0.65, maxRows = 80000, timeframe = "M1", dateRange = null) {
-  const pageSize = 1000;
-  const concurrency = 10;
-  const newestFirst = [];
-  const latestRows = await db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
-    "&timeframe=eq." + timeframe + "&select=candle_at&order=candle_at.desc&limit=1");
-  const cutoff = latestRows[0]?.candle_at;
-  if (!cutoff) {
-    return { available: false, symbol, timeframe, data_points: 0,
-      required_data_points: 5000, warning: "Aucune bougie M1 disponible." };
+const candleCache = new Map();
+
+export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThreshold = 0.65, maxRows = 80000, timeframe = "M1", dateRange = null, overrides = {}) {
+  const cacheKey = [symbol, timeframe, maxRows, dateRange?.start || "", dateRange?.end || ""].join("|");
+  let candles = candleCache.get(cacheKey);
+  if (!candles) {
+    const pageSize = 1000;
+    const concurrency = 10;
+    const newestFirst = [];
+    const latestRows = await db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
+      "&timeframe=eq." + timeframe + "&select=candle_at&order=candle_at.desc&limit=1");
+    const cutoff = latestRows[0]?.candle_at;
+    if (!cutoff) {
+      return { available: false, symbol, timeframe, data_points: 0,
+        required_data_points: 5000, warning: "Aucune bougie disponible." };
+    }
+    const effectiveEnd = dateRange?.end && new Date(dateRange.end) < new Date(cutoff) ? dateRange.end : cutoff;
+    const cutoffFilter = "&candle_at=lte." + encodeURIComponent(effectiveEnd) +
+      (dateRange?.start ? "&candle_at=gte." + encodeURIComponent(dateRange.start) : "");
+
+    for (let offset = 0; offset < maxRows; offset += pageSize * concurrency) {
+      const offsets = Array.from({ length: concurrency }, (_, i) => offset + i * pageSize)
+        .filter(value => value < maxRows);
+      const pages = await Promise.all(offsets.map(pageOffset =>
+        db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
+          "&timeframe=eq." + timeframe + "&select=candle_at,bid_open,bid_high,bid_low,bid_close,ask_open,ask_high,ask_low,ask_close,spread_close" +
+          cutoffFilter + "&order=candle_at.desc&limit=" + pageSize + "&offset=" + pageOffset)
+      ));
+      for (const page of pages) newestFirst.push(...page);
+      if (pages.some(page => page.length < pageSize) || newestFirst.length >= maxRows) break;
+    }
+
+    candles = newestFirst.filter(validCandle).sort((a, b) =>
+      new Date(a.candle_at).getTime() - new Date(b.candle_at).getTime()
+    ).slice(-maxRows);
+    if (candleCache.size > 8) candleCache.clear();
+    candleCache.set(cacheKey, candles);
   }
-  const effectiveEnd = dateRange?.end && new Date(dateRange.end) < new Date(cutoff) ? dateRange.end : cutoff;
-  const cutoffFilter = "&candle_at=lte." + encodeURIComponent(effectiveEnd) +
-    (dateRange?.start ? "&candle_at=gte." + encodeURIComponent(dateRange.start) : "");
-
-  for (let offset = 0; offset < maxRows; offset += pageSize * concurrency) {
-    const offsets = Array.from({ length: concurrency }, (_, i) => offset + i * pageSize)
-      .filter(value => value < maxRows);
-    const pages = await Promise.all(offsets.map(pageOffset =>
-      db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
-        "&timeframe=eq." + timeframe + "&select=candle_at,bid_open,bid_high,bid_low,bid_close,ask_open,ask_high,ask_low,ask_close,spread_close" +
-        cutoffFilter + "&order=candle_at.desc&limit=" + pageSize + "&offset=" + pageOffset)
-    ));
-    for (const page of pages) newestFirst.push(...page);
-    if (pages.some(page => page.length < pageSize) || newestFirst.length >= maxRows) break;
-  }
-
-  const rawCandles = newestFirst.filter(validCandle).sort((a, b) =>
-    new Date(a.candle_at).getTime() - new Date(b.candle_at).getTime()
-  ).slice(-maxRows);
-
-  const candles = rawCandles;
 
   if (candles.length < 5000) {
     return {
@@ -112,8 +118,8 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
   const barIntervalMs = timeframe === "M5" ? 300000 : 60000;
   const allowedGapMs = barIntervalMs;
   const trainBoundary = Math.floor(candles.length * 0.7);
-  const stopLoss = Math.max(0.1, Number(process.env.SCALPING_STOP_LOSS_POINTS || 5));
-  const takeProfit = Math.max(0.1, Number(process.env.SCALPING_TAKE_PROFIT_POINTS || 8));
+  const stopLoss = Math.max(0.1, Number(overrides.stopLoss ?? process.env.SCALPING_STOP_LOSS_POINTS ?? 5));
+  const takeProfit = Math.max(0.1, Number(overrides.takeProfit ?? process.env.SCALPING_TAKE_PROFIT_POINTS ?? 8));
   const maxSpread = Math.max(0.2, Number(process.env.SCALPING_MAX_SPREAD_POINTS || 1.5));
   const slippageEachSide = Math.max(0, Number(process.env.SCALPING_SLIPPAGE_POINTS || 0.05));
   const commissionRoundTrip = Math.max(0, Number(process.env.SCALPING_COMMISSION_POINTS || 0.20));
@@ -289,7 +295,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
     available: true,
     symbol,
     timeframe,
-    method: `${timeframe.toLowerCase()}_scalping_block_bootstrap_monte_carlo_bid_ask_v1`,
+    method: `${timeframe.toLowerCase()}_scalping_block_bootstrap_monte_carlo_bid_ask_v2_sl${stopLoss}_tp${takeProfit}_th${confidenceThreshold}`,
     model: "block_bootstrap_monte_carlo_v1",
     data_points: candles.length,
     first_tick_at: candles[0].candle_at,
