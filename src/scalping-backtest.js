@@ -273,6 +273,10 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
       pnl_points: roundedPnl,
       exit_reason: exitReason,
       same_bar_ambiguity: hitBothSameBar,
+      volatility_spread_ratio: Number((expectedRange / spread).toFixed(4)),
+      trend_alignment_score: Number(((direction === "BUY" ? momentum : -momentum) /
+        (sigma * Math.sqrt(momentumLookback))).toFixed(4)),
+      momentum_points: Number((current * momentum).toFixed(4)),
       sample: entryIndex < trainBoundary ? "in_sample" : "out_of_sample"
     });
 
@@ -283,7 +287,30 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
 
   const inSample = trades.filter(t => t.sample === "in_sample");
   const outOfSample = trades.filter(t => t.sample === "out_of_sample");
-  const warnings = [];
+  const filterDefinitions = [
+    { name: "baseline", description: "Tous les signaux de référence", test: () => true },
+    { name: "volatility_ratio_gte_2_5", description: "Volatilité attendue >= 2,5 fois le spread", test: t => t.volatility_spread_ratio >= 2.5 },
+    { name: "volatility_ratio_gte_3", description: "Volatilité attendue >= 3 fois le spread", test: t => t.volatility_spread_ratio >= 3 },
+    { name: "trend_score_gte_0_5", description: "Tendance alignée, score >= 0,5", test: t => t.trend_alignment_score >= 0.5 },
+    { name: "trend_score_gte_1", description: "Tendance alignée, score >= 1", test: t => t.trend_alignment_score >= 1 },
+    { name: "volatility_2_5_and_trend_0_5", description: "Volatilité >= 2,5x spread et tendance >= 0,5", test: t => t.volatility_spread_ratio >= 2.5 && t.trend_alignment_score >= 0.5 },
+    { name: "volatility_3_and_trend_1", description: "Volatilité >= 3x spread et tendance >= 1", test: t => t.volatility_spread_ratio >= 3 && t.trend_alignment_score >= 1 }
+  ];
+  const filterExperiments = filterDefinitions.map(filter => {
+    const selected = trades.filter(filter.test);
+    return {
+      name: filter.name,
+      description: filter.description,
+      overall: summarize(selected),
+      in_sample: summarize(selected.filter(t => t.sample === "in_sample")),
+      out_of_sample: summarize(selected.filter(t => t.sample === "out_of_sample")),
+      retained_trade_pct: trades.length ? Number((selected.length / trades.length * 100).toFixed(2)) : 0
+    };
+  });
+  const warnings = [
+    "Les filtres sont évalués après génération des signaux de référence : ils mesurent la sélection des transactions, pas une nouvelle stratégie réentraînée.",
+    "Les seuils sont exploratoires et ne doivent pas être activés en production sur ce seul échantillon."
+  ];
   if (candles.length < (timeframe === "M5" ? 5000 : 20000)) warnings.push(`Historique ${timeframe} encore limité : résultat exploratoire.`);
   if (trades.length < 30) warnings.push("Moins de 30 transactions : échantillon trop faible pour conclure.");
   if (outOfSample.length < 10) warnings.push("Moins de 10 transactions hors échantillon : validation indépendante insuffisante.");
@@ -329,6 +356,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
     overall: summarize(trades),
     in_sample: summarize(inSample),
     out_of_sample: summarize(outOfSample),
+    filter_experiments: filterExperiments,
     warnings,
     trades: trades.slice(-200)
   };
