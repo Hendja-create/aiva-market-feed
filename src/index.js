@@ -1142,7 +1142,8 @@ async function runScheduledScalpingBacktest(symbol) {
       return;
     }
     for (const timeframe of ["M1", "M5"]) {
-      const result = await runM1ScalpingBacktest(db, symbol, 0.65, 80000, timeframe, commonRange);
+      const maxRows = timeframe === "M1" ? 120000 : 80000;
+      const result = await runM1ScalpingBacktest(db, symbol, 0.65, maxRows, timeframe, commonRange);
       await saveScalpingBacktestResult(symbol, result);
     }
     console.log("M1/M5 common comparison period", JSON.stringify(commonRange));
@@ -1297,7 +1298,7 @@ const server = http.createServer(async (req, res) => {
       const elapsed = Date.now() - previousRequest;
       if (elapsed < 60000) return send(res, 429, { error: "backtest_rate_limited", retry_after_ms: 60000 - elapsed });
       analysisRateLimit.set(rateKey, Date.now());
-      const result = await runM1ScalpingBacktest(db, symbol, 0.65, 80000);
+      const result = await runM1ScalpingBacktest(db, symbol, 0.65, 120000);
       if (!result.available) return send(res, 422, result);
       const row = {
         symbol, method: result.method, data_points: result.data_points,
@@ -1347,7 +1348,8 @@ const server = http.createServer(async (req, res) => {
       if (!commonRange) return send(res, 422, { error: "insufficient_overlapping_history", message: "Il faut des historiques M1 et M5 qui se chevauchent." });
       const results = {};
       for (const timeframe of ["M1", "M5"]) {
-        results[timeframe] = await runM1ScalpingBacktest(db, symbol, 0.65, 80000, timeframe, commonRange);
+        const maxRows = timeframe === "M1" ? 120000 : 80000;
+        results[timeframe] = await runM1ScalpingBacktest(db, symbol, 0.65, maxRows, timeframe, commonRange);
         if (results[timeframe].available) {
           results[timeframe].run_id = await saveScalpingBacktestResult(symbol, results[timeframe]);
         }
