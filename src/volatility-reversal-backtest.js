@@ -61,6 +61,9 @@ export async function runVolatilityReversalBacktest(db, symbol = "XAUUSD", timef
   const impulseBodyMultiplier = Math.max(1.1, Number(overrides.impulseBodyMultiplier ?? 1.8));
   const rangeMultiplier = Math.max(1.1, Number(overrides.rangeMultiplier ?? 1.3));
   const maxSpread = 1.5;
+  const minConfirmationBodyRatio = Math.max(0, Number(overrides.minConfirmationBodyRatio ?? 0));
+  const sessionStartHourUtc = overrides.sessionStartHourUtc == null ? null : Number(overrides.sessionStartHourUtc);
+  const sessionEndHourUtc = overrides.sessionEndHourUtc == null ? null : Number(overrides.sessionEndHourUtc);
   const slippage = 0.05;
   const commission = 0.20;
   const trades = [];
@@ -95,6 +98,15 @@ export async function runVolatilityReversalBacktest(db, symbol = "XAUUSD", timef
     const isBearImpulse = -impulseBody > typicalBody * impulseBodyMultiplier &&
       impulseRange > typicalRange * rangeMultiplier;
     const confirmBody = Number(confirm.bid_close) - Number(confirm.bid_open);
+    const confirmRatio = Math.abs(confirmBody) / Math.max(Math.abs(impulseBody), 0.000001);
+    const signalHourUtc = new Date(confirm.candle_at).getUTCHours();
+    if (minConfirmationBodyRatio > 0 && confirmRatio < minConfirmationBodyRatio) continue;
+    if (sessionStartHourUtc !== null && sessionEndHourUtc !== null) {
+      const inSession = sessionStartHourUtc <= sessionEndHourUtc
+        ? signalHourUtc >= sessionStartHourUtc && signalHourUtc < sessionEndHourUtc
+        : signalHourUtc >= sessionStartHourUtc || signalHourUtc < sessionEndHourUtc;
+      if (!inSession) continue;
+    }
     let direction = null;
     if (isBearImpulse && confirmBody > 0 && Number(confirm.bid_close) > impulseMid) direction = "BUY";
     if (isBullImpulse && confirmBody < 0 && Number(confirm.bid_close) < impulseMid) direction = "SELL";
@@ -169,7 +181,9 @@ export async function runVolatilityReversalBacktest(db, symbol = "XAUUSD", timef
       horizon_candles: horizon, horizon_minutes: horizon * (timeframe === "M1" ? 1 : 5),
       impulse_body_multiplier: impulseBodyMultiplier, impulse_range_multiplier: rangeMultiplier,
       stop_loss_points: stopLoss, take_profit_points: takeProfit,
-      max_spread_points: maxSpread, slippage_each_side_points: slippage,
+      max_spread_points: maxSpread, min_confirmation_body_ratio: minConfirmationBodyRatio,
+      session_start_hour_utc: sessionStartHourUtc, session_end_hour_utc: sessionEndHourUtc,
+      slippage_each_side_points: slippage,
       commission_round_trip_points: commission, entry: "open of candle after reversal confirmation",
       max_one_trade_at_a_time: true, no_live_execution: true
     },
