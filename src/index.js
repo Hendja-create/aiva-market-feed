@@ -1088,6 +1088,24 @@ async function runScheduledBacktest(symbol) {
   }
 }
 
+async function getScalpingCommonRange(symbol) {
+  const ranges = {};
+  for (const timeframe of ["M1", "M5"]) {
+    const base = "aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
+      "&timeframe=eq." + timeframe + "&select=candle_at&limit=1&order=";
+    const [first, last] = await Promise.all([
+      db(base + "candle_at.asc"),
+      db(base + "candle_at.desc")
+    ]);
+    ranges[timeframe] = { first: first[0]?.candle_at || null, last: last[0]?.candle_at || null };
+  }
+  if (!ranges.M1.first || !ranges.M1.last || !ranges.M5.first || !ranges.M5.last) return null;
+  const start = new Date(Math.max(new Date(ranges.M1.first).getTime(), new Date(ranges.M5.first).getTime())).toISOString();
+  const end = new Date(Math.min(new Date(ranges.M1.last).getTime(), new Date(ranges.M5.last).getTime())).toISOString();
+  if (new Date(start) >= new Date(end)) return null;
+  return { start, end, source_ranges: ranges };
+}
+
 async function saveScalpingBacktestResult(symbol, result) {
   if (!result.available) {
     console.log(result.timeframe + " scalping backtest skipped", JSON.stringify(result));
@@ -1118,10 +1136,16 @@ async function runScheduledScalpingBacktest(symbol) {
   if (scheduledScalpingBacktestRunning) return;
   scheduledScalpingBacktestRunning = true;
   try {
+    const commonRange = await getScalpingCommonRange(symbol);
+    if (!commonRange) {
+      console.log("Scalping comparison waiting for overlapping M1/M5 history", symbol);
+      return;
+    }
     for (const timeframe of ["M1", "M5"]) {
-      const result = await runM1ScalpingBacktest(db, symbol, 0.65, 80000, timeframe);
+      const result = await runM1ScalpingBacktest(db, symbol, 0.65, 80000, timeframe, commonRange);
       await saveScalpingBacktestResult(symbol, result);
     }
+    console.log("M1/M5 common comparison period", JSON.stringify(commonRange));
   } catch (error) {
     console.error("Scalping comparison failed", error instanceof Error ? error.message : String(error));
   } finally {
@@ -1319,21 +1343,21 @@ const server = http.createServer(async (req, res) => {
       if (elapsed < 60000) return send(res, 429, { error: "backtest_rate_limited", retry_after_ms: 60000 - elapsed });
       analysisRateLimit.set(rateKey, Date.now());
 
+      const commonRange = await getScalpingCommonRange(symbol);
+      if (!commonRange) return send(res, 422, { error: "insufficient_overlapping_history", message: "Il faut des historiques M1 et M5 qui se chevauchent." });
       const results = {};
       for (const timeframe of ["M1", "M5"]) {
-        results[timeframe] = await runM1ScalpingBacktest(db, symbol, 0.65, 80000, timeframe);
+        results[timeframe] = await runM1ScalpingBacktest(db, symbol, 0.65, 80000, timeframe, commonRange);
         if (results[timeframe].available) {
           results[timeframe].run_id = await saveScalpingBacktestResult(symbol, results[timeframe]);
         }
       }
-      const comparable = results.M1.available && results.M5.available &&
-        results.M1.first_tick_at === results.M5.first_tick_at &&
-        results.M1.last_tick_at === results.M5.last_tick_at;
+      const comparable = results.M1.available && results.M5.available;
       return send(res, 200, {
-        symbol, comparison_valid: comparable,
+        symbol, comparison_valid: comparable, comparison_period: commonRange,
         comparison_note: comparable
-          ? "M1 et M5 couvrent exactement les mêmes bornes temporelles."
-          : "Les bornes temporelles ou la disponibilité diffèrent ; ne pas comparer les performances directement.",
+          ? "Les deux backtests utilisent la même fenêtre calendaire. Les horizons et la granularité diffèrent : M1 et M5 restent des stratégies distinctes."
+          : "Au moins un historique est insuffisant ; ne pas comparer les performances directement.",
         results
       });
     }
