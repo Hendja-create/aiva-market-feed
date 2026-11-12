@@ -249,7 +249,8 @@ async function getDemoRiskState(symbol) {
       "&status=eq.CLOSED&closed_at=gte." + encodeURIComponent(since) +
       "&select=pnl_points&limit=500"),
     db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) +
-      "&status=eq.CLOSED&select=pnl_points,closed_at&order=closed_at.desc&limit=" + maxConsecutiveLosses)
+      "&status=eq.CLOSED&closed_at=gte." + encodeURIComponent(since) +
+      "&select=pnl_points,closed_at&order=closed_at.desc&limit=" + maxConsecutiveLosses)
   ]);
   const dailyPnl = todayRows.reduce((sum, row) => sum + Number(row.pnl_points || 0), 0);
   let consecutiveLosses = 0;
@@ -541,8 +542,10 @@ function runHistoricalBacktest(ticks) {
   const stopLoss = Math.max(0.1, Number(process.env.DEMO_STOP_LOSS_POINTS || 5));
   const takeProfit = Math.max(0.1, Number(process.env.DEMO_TAKE_PROFIT_POINTS || 8));
   const horizon = 30, blockLength = 3, signalInterval = 60, trainBoundary = Math.floor(ticks.length * 0.7);
+  const maxDailyLoss = Math.max(1, Number(process.env.DEMO_MAX_DAILY_LOSS_POINTS || 15));
+  const maxConsecutiveLosses = Math.max(1, Math.floor(Number(process.env.DEMO_MAX_CONSECUTIVE_LOSSES || 3)));
   const trades = [];
-  let skippedSignals = 0;
+  let skippedSignals = 0, riskBlockedSignals = 0, currentDay = null, dailyPnl = 0, dailyLossStreak = 0;
   let i = 300;
 
   while (i + horizon + 1 < ticks.length) {
@@ -597,6 +600,18 @@ function runHistoricalBacktest(ticks) {
 
     if (!direction) { skippedSignals++; i += signalInterval; continue; }
 
+    const signalDay = localDateKey(new Date(ticks[i].received_at));
+    if (signalDay !== currentDay) {
+      currentDay = signalDay;
+      dailyPnl = 0;
+      dailyLossStreak = 0;
+    }
+    if (dailyPnl <= -maxDailyLoss || dailyLossStreak >= maxConsecutiveLosses) {
+      riskBlockedSignals++;
+      i += signalInterval;
+      continue;
+    }
+
     const entryIndex = i + 1;
     const entry = Number(direction === "BUY" ? ticks[entryIndex].ask : ticks[entryIndex].bid);
     let exitIndex = entryIndex + horizon;
@@ -613,16 +628,19 @@ function runHistoricalBacktest(ticks) {
       }
     }
     const pnl = (direction === "BUY" ? 1 : -1) * (exitPrice - entry);
+    const roundedPnl = Number(pnl.toFixed(4));
     trades.push({
       direction,
       entry_time: ticks[entryIndex].received_at,
       exit_time: ticks[exitIndex].received_at,
       entry_price: Number(entry.toFixed(4)),
       exit_price: Number(exitPrice.toFixed(4)),
-      pnl_points: Number(pnl.toFixed(4)),
+      pnl_points: roundedPnl,
       exit_reason: exitReason,
       sample: entryIndex < trainBoundary ? "in_sample" : "out_of_sample"
     });
+    dailyPnl += roundedPnl;
+    dailyLossStreak = roundedPnl < 0 ? dailyLossStreak + 1 : 0;
     i = Math.max(i + signalInterval, exitIndex);
   }
 
@@ -645,6 +663,8 @@ function runHistoricalBacktest(ticks) {
       horizon_ticks: horizon,
       stop_loss_points: stopLoss,
       take_profit_points: takeProfit,
+      max_daily_loss_points: maxDailyLoss,
+      max_consecutive_losses_per_day: maxConsecutiveLosses,
       entry_exit_use_bid_ask: true,
       spread_included: true,
       commissions: "non incluses",
@@ -652,6 +672,7 @@ function runHistoricalBacktest(ticks) {
       random_seed: "déterministe par index de cotation"
     },
     signals_without_entry: skippedSignals,
+    signals_blocked_by_risk_limits: riskBlockedSignals,
     overall: summarizeBacktestTrades(trades),
     in_sample: summarizeBacktestTrades(inSample),
     out_of_sample: summarizeBacktestTrades(outOfSample),
