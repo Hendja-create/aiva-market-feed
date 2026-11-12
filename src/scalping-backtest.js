@@ -72,7 +72,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
     "&timeframe=eq." + timeframe + "&select=candle_at&order=candle_at.desc&limit=1");
   const cutoff = latestRows[0]?.candle_at;
   if (!cutoff) {
-    return { available: false, symbol, timeframe: "M1", data_points: 0,
+    return { available: false, symbol, timeframe, data_points: 0,
       required_data_points: 5000, warning: "Aucune bougie M1 disponible." };
   }
   const effectiveEnd = dateRange?.end && new Date(dateRange.end) < new Date(cutoff) ? dateRange.end : cutoff;
@@ -110,7 +110,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
   const blockLength = timeframe === "M5" ? 1 : 3;
   const signalInterval = timeframe === "M5" ? 1 : 5;
   const barIntervalMs = timeframe === "M5" ? 300000 : 60000;
-  const allowedGapMs = barIntervalMs * 2;
+  const allowedGapMs = barIntervalMs;
   const trainBoundary = Math.floor(candles.length * 0.7);
   const stopLoss = Math.max(0.1, Number(process.env.SCALPING_STOP_LOSS_POINTS || 5));
   const takeProfit = Math.max(0.1, Number(process.env.SCALPING_TAKE_PROFIT_POINTS || 8));
@@ -134,6 +134,12 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
   let currentDay = null, dailyPnl = 0, dailyLossStreak = 0;
 
   for (let i = lookback; i + horizon < candles.length; i += signalInterval) {
+    let completeSample = true;
+    for (let j = i - lookback + 1; j <= i; j++) {
+      const gap = new Date(candles[j].candle_at).getTime() - new Date(candles[j - 1].candle_at).getTime();
+      if (gap !== barIntervalMs) { completeSample = false; break; }
+    }
+    if (!completeSample) { skippedSignals++; continue; }
     const sample = returns.slice(i - lookback + 1, i + 1);
     const currentCandle = candles[i];
     const current = (Number(currentCandle.bid_close) + Number(currentCandle.ask_close)) / 2;
@@ -144,7 +150,8 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
     if (!(sigma > 0)) { skippedSignals++; continue; }
     const expectedRange = current * sigma * Math.sqrt(horizon);
     const spreadRatio = expectedRange > 0 ? spread / expectedRange : 1;
-    const momentum = sample.slice(-10).reduce((sum, value) => sum + value, 0);
+    const momentumLookback = timeframe === "M5" ? 2 : 10;
+    const momentum = sample.slice(-momentumLookback).reduce((sum, value) => sum + value, 0);
     const random = seededRandom((i * 2654435761 + Math.round(confidenceThreshold * 10000)) >>> 0);
 
     let up = 0, down = 0, flat = 0, sumMove = 0, adverse = 0;
