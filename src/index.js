@@ -1520,6 +1520,6 @@ setTimeout(() => { for (const symbol of symbols) runHistoricalM5Import(symbol); 
 setInterval(() => { for (const symbol of symbols) runHistoricalM5Import(symbol); }, historicalM5ImportIntervalMs);
 console.log("Dukascopy M5 history importer enabled", historicalM5ImportIntervalMs, "ms");
 const scalpingBacktestIntervalMs = Math.max(30 * 60 * 1000, Number(process.env.SCALPING_BACKTEST_INTERVAL_MS || 21600000));
-setTimeout(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, 20 * 60 * 1000).unref();
+setTimeout(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, 90 * 1000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, scalpingBacktestIntervalMs);
 console.log("M1/M5 scalping comparison scheduler enabled", scalpingBacktestIntervalMs, "ms");
