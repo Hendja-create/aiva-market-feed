@@ -1,5 +1,6 @@
 import http from "node:http";
 import { io } from "socket.io-client";
+import { importDukascopyM1Chunk } from "./dukascopy-history.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -77,6 +78,8 @@ async function verifyUserToken(token) {
 // They do not authorize or block intraday scalping entries until independently validated.
 const historicalContextCache = new Map();
 let historicalImportRunning = false;
+let historicalM1ImportRunning = false;
+let historicalM1LastRun = null;
 
 function utcDateString(date) { return date.toISOString().slice(0, 10); }
 function addUtcDays(dateString, days) {
@@ -255,6 +258,25 @@ async function importHistoricalDaily(symbol) {
     console.error("Historical daily import failed", error instanceof Error ? error.message : String(error));
   } finally {
     historicalImportRunning = false;
+  }
+}
+
+async function runHistoricalM1Import(symbol) {
+  if (historicalM1ImportRunning) return;
+  historicalM1ImportRunning = true;
+  try {
+    const result = await importDukascopyM1Chunk(db, symbol);
+    historicalM1LastRun = { ...result, completed_at: new Date().toISOString() };
+    console.log("Dukascopy M1 import cycle", JSON.stringify(historicalM1LastRun));
+  } catch (error) {
+    historicalM1LastRun = {
+      status: "error",
+      message: error instanceof Error ? error.message : String(error),
+      completed_at: new Date().toISOString()
+    };
+    console.error("Dukascopy M1 import failed", historicalM1LastRun.message);
+  } finally {
+    historicalM1ImportRunning = false;
   }
 }
 
@@ -1073,7 +1095,27 @@ const server = http.createServer(async (req, res) => {
         lastQuoteAt,
         lastError
       });
-    }    if (url.pathname === "/api/historical-validation") {
+    }    if (url.pathname === "/api/scalping-history-status") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const [earliest, latest] = await Promise.all([
+        db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
+          "&timeframe=eq.M1&select=candle_at&order=candle_at.asc&limit=1"),
+        db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
+          "&timeframe=eq.M1&select=candle_at,bid_close,ask_close,spread_close&order=candle_at.desc&limit=1")
+      ]);
+      return send(res, 200, {
+        symbol,
+        timeframe: "M1",
+        source: "Dukascopy historical Bid/Ask candles",
+        first_candle_at: earliest[0]?.candle_at || null,
+        last_candle: latest[0] || null,
+        backfill_running: historicalM1ImportRunning,
+        last_import: historicalM1LastRun,
+        note: "Historique séparé du flux Live-Rates. Pas encore utilisé pour les décisions de trading."
+      });
+    }
+    if (url.pathname === "/api/historical-validation") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
       return send(res, 200, await runHistoricalDailyValidation(symbol));
@@ -1303,3 +1345,7 @@ const historicalImportIntervalMs = 24 * 60 * 60 * 1000;
 setTimeout(() => { for (const symbol of symbols) importHistoricalDaily(symbol); }, 45000).unref();
 setInterval(() => { for (const symbol of symbols) importHistoricalDaily(symbol); }, historicalImportIntervalMs);
 console.log("Historical daily import scheduler enabled", historicalImportIntervalMs, "ms");
+const historicalM1ImportIntervalMs = Math.max(300000, Number(process.env.DUKASCOPY_M1_IMPORT_INTERVAL_MS || 300000));
+setTimeout(() => { for (const symbol of symbols) runHistoricalM1Import(symbol); }, 60000).unref();
+setInterval(() => { for (const symbol of symbols) runHistoricalM1Import(symbol); }, historicalM1ImportIntervalMs);
+console.log("Dukascopy M1 history importer enabled", historicalM1ImportIntervalMs, "ms");
