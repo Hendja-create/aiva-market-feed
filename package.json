@@ -3,7 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22 <23" },
-  "scripts": { "start": "node src/index.js" },
-  "dependencies": { "socket.io-client": "4.8.1" }
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "socket.io-client": "4.8.1",
+    "dukascopy-node": "1.51.1"
+  }
 }
