@@ -52,9 +52,10 @@ async function db(path, options = {}) {
 function send(res, status, body) {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
-    "access-control-allow-origin": process.env.DASHBOARD_ORIGIN || "*",
+    "access-control-allow-origin": res.getHeader("access-control-allow-origin") || process.env.DASHBOARD_ORIGIN || "*",
     "access-control-allow-methods": "GET, OPTIONS",
-    "access-control-allow-headers": "Content-Type, Authorization"
+    "access-control-allow-headers": "Content-Type, Authorization",
+    "vary": "Origin"
   });
   res.end(JSON.stringify(body));
 }
@@ -730,6 +731,13 @@ async function runScheduledBacktest(symbol) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const allowedOrigins = (process.env.DASHBOARD_ORIGINS || process.env.DASHBOARD_ORIGIN || "*")
+    .split(",").map(origin => origin.trim()).filter(Boolean);
+  const requestOrigin = req.headers.origin;
+  const corsOrigin = allowedOrigins.includes("*") ? "*" :
+    (requestOrigin && allowedOrigins.includes(requestOrigin) ? requestOrigin : "null");
+  res.setHeader("access-control-allow-origin", corsOrigin);
+  res.setHeader("vary", "Origin");
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, "http://localhost");
