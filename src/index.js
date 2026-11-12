@@ -1652,6 +1652,6 @@ setTimeout(() => { for (const symbol of symbols) runScheduledScalpingBacktest(sy
 setInterval(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, scalpingBacktestIntervalMs);
 console.log("M1/M5 scalping comparison scheduler enabled", scalpingBacktestIntervalMs, "ms");
 const volatilityReversalIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.VOLATILITY_REVERSAL_INTERVAL_MS || 21600000));
-setTimeout(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, 5 * 60 * 1000).unref();
+setTimeout(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, 15000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, volatilityReversalIntervalMs);
 console.log("Experimental volatility reversal research scheduler enabled", volatilityReversalIntervalMs, "ms");
