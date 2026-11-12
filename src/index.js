@@ -1,6 +1,6 @@
 import http from "node:http";
 import { io } from "socket.io-client";
-import { importDukascopyM1Chunk } from "./dukascopy-history.js";
+import { importDukascopyM1Chunk, importDukascopyM5Chunk } from "./dukascopy-history.js";
 import { runM1ScalpingBacktest } from "./scalping-backtest.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
@@ -81,6 +81,8 @@ const historicalContextCache = new Map();
 let historicalImportRunning = false;
 let historicalM1ImportRunning = false;
 let historicalM1LastRun = null;
+let historicalM5ImportRunning = false;
+let historicalM5LastRun = null;
 
 function utcDateString(date) { return date.toISOString().slice(0, 10); }
 function addUtcDays(dateString, days) {
@@ -278,6 +280,25 @@ async function runHistoricalM1Import(symbol) {
     console.error("Dukascopy M1 import failed", historicalM1LastRun.message);
   } finally {
     historicalM1ImportRunning = false;
+  }
+}
+
+async function runHistoricalM5Import(symbol) {
+  if (historicalM5ImportRunning) return;
+  historicalM5ImportRunning = true;
+  try {
+    const result = await importDukascopyM5Chunk(db, symbol);
+    historicalM5LastRun = { ...result, completed_at: new Date().toISOString() };
+    console.log("Dukascopy M5 import cycle", JSON.stringify(historicalM5LastRun));
+  } catch (error) {
+    historicalM5LastRun = {
+      status: "error",
+      message: error instanceof Error ? error.message : String(error),
+      completed_at: new Date().toISOString()
+    };
+    console.error("Dukascopy M5 import failed", historicalM5LastRun.message);
+  } finally {
+    historicalM5ImportRunning = false;
   }
 }
 
@@ -1266,6 +1287,25 @@ const server = http.createServer(async (req, res) => {
       });
       return send(res, 200, { ...result, run_id: saved?.[0]?.id || null });
     }
+    if (url.pathname === "/api/scalping-history-status") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const [m1, m5] = await Promise.all([
+        db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) + "&timeframe=eq.M1&select=candle_at&order=candle_at.asc&limit=1"),
+        db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) + "&timeframe=eq.M5&select=candle_at&order=candle_at.asc&limit=1")
+      ]);
+      const [m1Last, m5Last, m1Count, m5Count] = await Promise.all([
+        db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) + "&timeframe=eq.M1&select=candle_at&order=candle_at.desc&limit=1"),
+        db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) + "&timeframe=eq.M5&select=candle_at&order=candle_at.desc&limit=1"),
+        db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) + "&timeframe=eq.M1&select=candle_at&limit=1&count=exact"),
+        db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) + "&timeframe=eq.M5&select=candle_at&limit=1&count=exact")
+      ]);
+      return send(res, 200, {
+        symbol,
+        M1: { first: m1[0]?.candle_at || null, last: m1Last[0]?.candle_at || null, importing: historicalM1ImportRunning, last_import: historicalM1LastRun },
+        M5: { first: m5[0]?.candle_at || null, last: m5Last[0]?.candle_at || null, importing: historicalM5ImportRunning, last_import: historicalM5LastRun }
+      });
+    }
     if (url.pathname === "/api/scalping-comparison") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
@@ -1449,6 +1489,10 @@ const historicalM1ImportIntervalMs = Math.max(60000, Number(process.env.DUKASCOP
 setTimeout(() => { for (const symbol of symbols) runHistoricalM1Import(symbol); }, 60000).unref();
 setInterval(() => { for (const symbol of symbols) runHistoricalM1Import(symbol); }, historicalM1ImportIntervalMs);
 console.log("Dukascopy M1 history importer enabled", historicalM1ImportIntervalMs, "ms");
+const historicalM5ImportIntervalMs = Math.max(60000, Number(process.env.DUKASCOPY_M5_IMPORT_INTERVAL_MS || 120000));
+setTimeout(() => { for (const symbol of symbols) runHistoricalM5Import(symbol); }, 90000).unref();
+setInterval(() => { for (const symbol of symbols) runHistoricalM5Import(symbol); }, historicalM5ImportIntervalMs);
+console.log("Dukascopy M5 history importer enabled", historicalM5ImportIntervalMs, "ms");
 const scalpingBacktestIntervalMs = Math.max(30 * 60 * 1000, Number(process.env.SCALPING_BACKTEST_INTERVAL_MS || 21600000));
 setTimeout(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, 20 * 60 * 1000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, scalpingBacktestIntervalMs);
