@@ -233,49 +233,157 @@ function periodKey(date, period) {
   const day = localDateKey(date);
   return period === "monthly" ? day.slice(0, 7) : period === "weekly" ? isoWeekKey(date) : day;
 }
+function kinshasaDayStartUtc(now = new Date()) {
+  const key = localDateKey(now);
+  const [year, month, day] = key.split("-").map(Number);
+  // Africa/Kinshasa is UTC+1; convert local midnight to UTC.
+  return new Date(Date.UTC(year, month - 1, day) - 60 * 60 * 1000).toISOString();
+}
+
+async function getDemoRiskState(symbol) {
+  const maxDailyLoss = Math.max(1, Number(process.env.DEMO_MAX_DAILY_LOSS_POINTS || 15));
+  const maxConsecutiveLosses = Math.max(1, Math.floor(Number(process.env.DEMO_MAX_CONSECUTIVE_LOSSES || 3)));
+  const since = kinshasaDayStartUtc();
+  const [todayRows, recentRows] = await Promise.all([
+    db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) +
+      "&status=eq.CLOSED&closed_at=gte." + encodeURIComponent(since) +
+      "&select=pnl_points&limit=500"),
+    db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) +
+      "&status=eq.CLOSED&select=pnl_points,closed_at&order=closed_at.desc&limit=" + maxConsecutiveLosses)
+  ]);
+  const dailyPnl = todayRows.reduce((sum, row) => sum + Number(row.pnl_points || 0), 0);
+  let consecutiveLosses = 0;
+  for (const row of recentRows) {
+    const pnl = Number(row.pnl_points || 0);
+    if (pnl < 0) consecutiveLosses++;
+    else break;
+  }
+  return {
+    dailyPnl: Number(dailyPnl.toFixed(4)),
+    maxDailyLoss,
+    consecutiveLosses,
+    maxConsecutiveLosses,
+    blockedByDailyLoss: dailyPnl <= -maxDailyLoss,
+    blockedByLosingStreak: consecutiveLosses >= maxConsecutiveLosses
+  };
+}
+
 async function manageDemoTrade(symbol, analysis) {
-  if (String(process.env.DEMO_TRADING_ENABLED || "true").toLowerCase() !== "true") return { mode: "disabled" };
-  const openRows = await db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) + "&status=eq.OPEN&select=id,direction,entry_price,opened_at&order=opened_at.asc&limit=1");
+  if (String(process.env.DEMO_TRADING_ENABLED || "true").toLowerCase() !== "true") {
+    return { mode: "disabled" };
+  }
+
+  const stopLossPoints = Math.max(0.1, Number(process.env.DEMO_STOP_LOSS_POINTS || 5));
+  const takeProfitPoints = Math.max(0.1, Number(process.env.DEMO_TAKE_PROFIT_POINTS || 8));
+  const maxDailyLossPoints = Math.max(1, Number(process.env.DEMO_MAX_DAILY_LOSS_POINTS || 15));
+  const maxConsecutiveLosses = Math.max(1, Math.floor(Number(process.env.DEMO_MAX_CONSECUTIVE_LOSSES || 3)));
+
+  const openRows = await db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) +
+    "&status=eq.OPEN&select=id,direction,entry_price,opened_at,context&order=opened_at.asc&limit=1");
+
+  const quotes = await db("market_quotes?symbol=eq." + encodeURIComponent(symbol) +
+    "&select=bid,ask,mid,received_at&limit=1");
+  const q = quotes[0];
+  const quoteAge = q ? Date.now() - new Date(q.received_at).getTime() : Infinity;
+  const freshQuote = Boolean(q && Number.isFinite(quoteAge) && quoteAge >= -30000 && quoteAge <= 90000);
+
   if (openRows.length) {
     const trade = openRows[0];
-    const ticks = await db("market_quote_ticks?symbol=eq." + encodeURIComponent(symbol) +
-      "&received_at=gt." + encodeURIComponent(trade.opened_at) +
-      "&select=bid,ask,mid,received_at&order=received_at.asc&limit=30");
-    if (ticks.length >= 30) {
-      const exitTick = ticks[29];
-      const exitPrice = Number(trade.direction === "BUY" ? exitTick.bid : exitTick.ask);
-      const entryPrice = Number(trade.entry_price);
-      const pnl = (trade.direction === "BUY" ? 1 : -1) * (exitPrice - entryPrice);
+    if (!freshQuote) {
+      return { mode: "demo", open: true, risk_monitoring: "waiting_for_fresh_quote" };
+    }
+
+    const entryPrice = Number(trade.entry_price);
+    const markPrice = Number(trade.direction === "BUY" ? q.bid : q.ask);
+    const pnl = (trade.direction === "BUY" ? 1 : -1) * (markPrice - entryPrice);
+    const context = trade.context && typeof trade.context === "object" ? trade.context : {};
+    const sl = Math.max(0.1, Number(context.stop_loss_points || stopLossPoints));
+    const tp = Math.max(0.1, Number(context.take_profit_points || takeProfitPoints));
+
+    let closeReason = null;
+    if (pnl <= -sl) closeReason = "Stop-loss virtuel atteint";
+    else if (pnl >= tp) closeReason = "Take-profit virtuel atteint";
+
+    let ticks = [];
+    if (!closeReason) {
+      ticks = await db("market_quote_ticks?symbol=eq." + encodeURIComponent(symbol) +
+        "&received_at=gt." + encodeURIComponent(trade.opened_at) +
+        "&select=bid,ask,mid,received_at&order=received_at.asc&limit=30");
+      if (ticks.length >= 30) closeReason = "Horizon de 30 cotations atteint";
+    }
+
+    if (closeReason) {
+      const exitPrice = markPrice;
+      const finalPnl = Number(pnl.toFixed(4));
       await db("aiva_demo_trades?id=eq." + encodeURIComponent(trade.id), {
         method: "PATCH", headers: { Prefer: "return=minimal" },
         body: JSON.stringify({
-          exit_price: exitPrice, pnl_points: Number(pnl.toFixed(4)),
-          status: "CLOSED", closed_at: new Date().toISOString(),
-          close_reason: "Horizon de 30 cotations atteint"
+          exit_price: exitPrice,
+          pnl_points: finalPnl,
+          status: "CLOSED",
+          closed_at: new Date().toISOString(),
+          close_reason: closeReason
         })
       });
-      console.log("Demo trade closed", JSON.stringify({ symbol, direction: trade.direction, pnl_points: Number(pnl.toFixed(4)) }));
-      return { mode: "demo", closed: true, pnl_points: Number(pnl.toFixed(4)) };
+      console.log("Demo trade closed", JSON.stringify({
+        symbol, direction: trade.direction, pnl_points: finalPnl, close_reason: closeReason
+      }));
+      return { mode: "demo", closed: true, pnl_points: finalPnl, close_reason: closeReason };
     }
-    return { mode: "demo", open: true, waiting_ticks: Math.max(0, 30 - ticks.length) };
+
+    return {
+      mode: "demo", open: true, pnl_points: Number(pnl.toFixed(4)),
+      stop_loss_remaining: Number(Math.max(0, sl + pnl).toFixed(4)),
+      take_profit_remaining: Number(Math.max(0, tp - pnl).toFixed(4)),
+      waiting_ticks: Math.max(0, 30 - ticks.length)
+    };
   }
-  if (!analysis || !["BUY", "SELL"].includes(analysis.decision)) return { mode: "demo", opened: false, reason: "NO_TRADE" };
-  const quotes = await db("market_quotes?symbol=eq." + encodeURIComponent(symbol) + "&select=bid,ask,mid,received_at&limit=1");
-  const q = quotes[0];
-  if (!q || Date.now() - new Date(q.received_at).getTime() > 90000) return { mode: "demo", opened: false, reason: "stale_quote" };
+
+  const risk = await getDemoRiskState(symbol);
+  if (risk.blockedByDailyLoss || risk.blockedByLosingStreak) {
+    return {
+      mode: "demo", opened: false, reason: risk.blockedByDailyLoss ? "daily_loss_limit" : "consecutive_losses_limit",
+      risk
+    };
+  }
+  if (!analysis || !["BUY", "SELL"].includes(analysis.decision)) {
+    return { mode: "demo", opened: false, reason: "NO_TRADE", risk };
+  }
+  if (!freshQuote) {
+    return { mode: "demo", opened: false, reason: "stale_quote" };
+  }
+
   const entry = Number(analysis.decision === "BUY" ? q.ask : q.bid);
   const saved = await db("aiva_demo_trades", {
     method: "POST", headers: { Prefer: "return=representation" },
     body: JSON.stringify({
-      symbol, direction: analysis.decision, entry_price: entry, quantity: 1,
-      analysis_id: analysis.id || null, context: {
-        confidence: analysis.confidence, risk_score: analysis.risk_score,
-        simulations: analysis.simulations, model: analysis.features?.model || "unknown"
+      symbol,
+      direction: analysis.decision,
+      entry_price: entry,
+      quantity: 1,
+      analysis_id: analysis.id || null,
+      context: {
+        confidence: analysis.confidence,
+        risk_score: analysis.risk_score,
+        simulations: analysis.simulations,
+        model: analysis.features?.model || "unknown",
+        stop_loss_points: stopLossPoints,
+        take_profit_points: takeProfitPoints,
+        max_daily_loss_points: maxDailyLossPoints,
+        max_consecutive_losses: maxConsecutiveLosses
       }
     })
   });
-  console.log("Demo trade opened", JSON.stringify({ symbol, direction: analysis.decision, entry_price: entry, trade_id: saved?.[0]?.id }));
-  return { mode: "demo", opened: true, direction: analysis.decision, entry_price: entry, trade_id: saved?.[0]?.id || null };
+  console.log("Demo trade opened", JSON.stringify({
+    symbol, direction: analysis.decision, entry_price: entry,
+    stop_loss_points: stopLossPoints, take_profit_points: takeProfitPoints,
+    trade_id: saved?.[0]?.id
+  }));
+  return {
+    mode: "demo", opened: true, direction: analysis.decision,
+    entry_price: entry, stop_loss_points: stopLossPoints,
+    take_profit_points: takeProfitPoints, trade_id: saved?.[0]?.id || null
+  };
 }
 async function getDemoHistory(period, symbol) {
   const now = new Date();
@@ -327,7 +435,13 @@ async function runAutonomousCycle() {
     for (const symbol of symbols) {
       await loadAdaptiveState(symbol);
       const learning = await evaluatePendingAnalyses(symbol);
-      const analysis = await getAnalysis(symbol);
+      // Position protection must keep running even if a fresh analysis cannot be generated.
+      let analysis = null;
+      try {
+        analysis = await getAnalysis(symbol);
+      } catch (analysisError) {
+        console.warn("Analysis skipped; continuing demo risk management", analysisError.message);
+      }
       const demo = await manageDemoTrade(symbol, analysis);
       await db("aiva_learning_state?on_conflict=symbol", {
         method: "POST",
