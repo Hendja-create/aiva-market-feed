@@ -530,17 +530,24 @@ function summarizeBacktestTrades(trades) {
 }
 
 async function loadBacktestTicks(symbol, maxRows = 10000) {
+  // Fetch the newest window first. Ascending pagination used to keep the
+  // oldest 10k rows forever once the table grew beyond maxRows.
   const all = [];
-  for (let offset = 0; offset < maxRows; offset += 1000) {
+  const pageSize = 1000;
+  for (let offset = 0; offset < maxRows; offset += pageSize) {
     const page = await db("market_quote_ticks?symbol=eq." + encodeURIComponent(symbol) +
-      "&select=bid,ask,mid,spread,received_at&order=received_at.asc&limit=1000&offset=" + offset);
+      "&select=bid,ask,mid,spread,received_at&order=received_at.desc&limit=" + pageSize + "&offset=" + offset);
     all.push(...page);
-    if (page.length < 1000) break;
+    if (page.length < pageSize) break;
   }
-  return all.slice(-maxRows).filter(t =>
-    Number.isFinite(Number(t.bid)) && Number.isFinite(Number(t.ask)) &&
-    Number.isFinite(Number(t.mid)) && Number(t.ask) >= Number(t.bid)
-  );
+  return all
+    .filter(t =>
+      Number.isFinite(Number(t.bid)) && Number.isFinite(Number(t.ask)) &&
+      Number.isFinite(Number(t.mid)) && Number(t.ask) >= Number(t.bid) &&
+      Number.isFinite(new Date(t.received_at).getTime())
+    )
+    .sort((a, b) => new Date(a.received_at).getTime() - new Date(b.received_at).getTime())
+    .slice(-maxRows);
 }
 
 function runHistoricalBacktest(ticks) {
