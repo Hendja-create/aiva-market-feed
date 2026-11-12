@@ -680,6 +680,50 @@ function runHistoricalBacktest(ticks) {
   };
 }
 
+let scheduledBacktestRunning = false;
+async function runScheduledBacktest(symbol) {
+  if (scheduledBacktestRunning) return;
+  scheduledBacktestRunning = true;
+  try {
+    const ticks = await loadBacktestTicks(symbol, 10000);
+    if (ticks.length < 500) {
+      console.log("Scheduled backtest skipped: insufficient history", JSON.stringify({ symbol, available: ticks.length, required: 500 }));
+      return;
+    }
+    const result = runHistoricalBacktest(ticks);
+    const warnings = [];
+    if (ticks.length < 5000) warnings.push("Historique court : résultats exploratoires uniquement.");
+    if (result.overall.trades < 30) warnings.push("Moins de 30 trades : échantillon trop faible pour conclure.");
+    if (result.out_of_sample.trades < 10) warnings.push("Moins de 10 trades hors échantillon : validation indépendante insuffisante.");
+    const row = {
+      symbol,
+      method: result.method,
+      data_points: result.data_points,
+      first_tick_at: result.first_tick_at,
+      last_tick_at: result.last_tick_at,
+      train_boundary_at: result.train_boundary_at,
+      overall: result.overall,
+      in_sample: result.in_sample,
+      out_of_sample: result.out_of_sample,
+      assumptions: result.assumptions,
+      warnings
+    };
+    const saved = await db("aiva_backtest_runs", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify(row)
+    });
+    console.log("Scheduled backtest saved", JSON.stringify({
+      symbol, data_points: result.data_points, overall: result.overall,
+      out_of_sample: result.out_of_sample, warnings, run_id: saved?.[0]?.id
+    }));
+  } catch (error) {
+    console.error("Scheduled backtest failed", error instanceof Error ? error.message : String(error));
+  } finally {
+    scheduledBacktestRunning = false;
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
@@ -736,6 +780,16 @@ const server = http.createServer(async (req, res) => {
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
       const rows = await db("market_quotes?symbol=eq." + encodeURIComponent(symbol) + "&select=symbol,bid,ask,mid,spread,provider_timestamp,received_at,source,connection_status,latency_ms&limit=1");
       return send(res, 200, rows[0] || { error: "quote_not_found" });
+    }
+    if (url.pathname === "/api/backtest-history") {
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const rows = await db("aiva_backtest_runs?symbol=eq." + encodeURIComponent(symbol) +
+        "&select=id,symbol,method,data_points,first_tick_at,last_tick_at,train_boundary_at,overall,in_sample,out_of_sample,assumptions,warnings,created_at&order=created_at.desc&limit=20");
+      return send(res, 200, { symbol, runs: rows });
     }
     if (url.pathname === "/api/backtest") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
@@ -867,4 +921,8 @@ const autonomousIntervalMs = Math.max(30000, Math.min(300000, Number(process.env
 setTimeout(() => { runAutonomousCycle(); }, 20000);
 setInterval(runAutonomousCycle, autonomousIntervalMs);
 console.log("Autonomous analysis scheduler enabled", autonomousIntervalMs, "ms");
+const backtestIntervalMs = Math.max(3600000, Number(process.env.BACKTEST_INTERVAL_MS || 21600000));
+setTimeout(() => { for (const symbol of symbols) runScheduledBacktest(symbol); }, 90000).unref();
+setInterval(() => { for (const symbol of symbols) runScheduledBacktest(symbol); }, backtestIntervalMs);
+console.log("Scheduled historical backtest enabled", backtestIntervalMs, "ms");
 
