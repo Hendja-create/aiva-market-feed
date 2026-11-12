@@ -28,7 +28,10 @@ async function db(path, options = {}) {
   });
   if (!response.ok) throw new Error("Supabase " + response.status + ": " + (await response.text()).slice(0, 250));
   if (response.status === 204) return null;
-  return response.json();
+  const responseText = await response.text();
+  if (!responseText.trim()) return null;
+  try { return JSON.parse(responseText); }
+  catch { throw new Error("Supabase returned invalid JSON"); }
 }
 
 function send(res, status, body) {
@@ -46,6 +49,11 @@ async function getAnalysis(symbol) {
     "&select=bid,ask,mid,spread,received_at&order=received_at.desc&limit=300");
   const ticks = rows.slice().reverse();
   if (!ticks.length) throw new Error("Aucune cotation historique disponible");
+  const latestTickAt = new Date(ticks[ticks.length - 1].received_at).getTime();
+  const quoteAgeMs = Date.now() - latestTickAt;
+  if (!Number.isFinite(latestTickAt) || quoteAgeMs > 90000 || quoteAgeMs < -30000) {
+    throw new Error("Cotation trop ancienne ou horodatage invalide : analyse bloquée.");
+  }
   const current = Number(ticks[ticks.length - 1].mid);
   const spread = Number(ticks[ticks.length - 1].spread);
   const prices = ticks.map(t => Number(t.mid)).filter(Number.isFinite);
