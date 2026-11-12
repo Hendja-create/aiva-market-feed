@@ -233,7 +233,24 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname === "/" || url.pathname === "/health") {
-      return send(res, connected ? 200 : 503, { service: "aiva-market-feed", connected, symbols, lastQuoteAt, received, lastError });
+      return send(res, 200, {
+        service: "aiva-market-feed",
+        status: "alive",
+        connected,
+        symbols,
+        lastQuoteAt,
+        received,
+        lastError
+      });
+    }
+    if (url.pathname === "/ready") {
+      return send(res, connected ? 200 : 503, {
+        service: "aiva-market-feed",
+        status: connected ? "ready" : "waiting_for_market_feed",
+        connected,
+        lastQuoteAt,
+        lastError
+      });
     }
     if (url.pathname === "/api/quote") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
@@ -266,7 +283,10 @@ const server = http.createServer(async (req, res) => {
     return send(res, 500, { error: "internal_error", message: lastError });
   }
 });
-server.listen(Number(process.env.PORT || 3000), "0.0.0.0", () => console.log("Health and API endpoints ready"));
+server.listen(Number(process.env.PORT || 3000), "0.0.0.0", () => {
+  console.log("HTTP server listening", JSON.stringify(server.address()));
+  console.log("Health and API endpoints ready");
+});
 
 function parse(raw) {
   if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return null; } }
