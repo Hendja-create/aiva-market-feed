@@ -2,6 +2,7 @@ import http from "node:http";
 import { io } from "socket.io-client";
 import { importDukascopyM1Chunk, importDukascopyM5Chunk } from "./dukascopy-history.js";
 import { runM1ScalpingBacktest } from "./scalping-backtest.js";
+import { runVolatilityReversalBacktest } from "./volatility-reversal-backtest.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -1185,7 +1186,35 @@ const server = http.createServer(async (req, res) => {
         lastQuoteAt,
         lastError
       });
-    }    if (url.pathname === "/api/scalping-history-status") {
+    }    if (url.pathname === "/api/volatility-reversal-backtest") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      const timeframe = (url.searchParams.get("timeframe") || "M5").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      if (!["M1", "M5"].includes(timeframe)) return send(res, 400, { error: "invalid_timeframe" });
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
+      const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+      const rateKey = "volatility-reversal:" + clientIp;
+      const previousRequest = analysisRateLimit.get(rateKey) || 0;
+      const elapsed = Date.now() - previousRequest;
+      if (elapsed < 900000) return send(res, 429, { error: "strategy_test_rate_limited", retry_after_ms: 900000 - elapsed });
+      analysisRateLimit.set(rateKey, Date.now());
+      const result = await runVolatilityReversalBacktest(db, symbol, timeframe, timeframe === "M1" ? 120000 : 80000);
+      if (!result.available) return send(res, 422, result);
+      const saved = await db("aiva_backtest_runs", {
+        method: "POST", headers: { Prefer: "return=representation" },
+        body: JSON.stringify({
+          symbol, method: result.method, data_points: result.data_points,
+          first_tick_at: result.first_tick_at, last_tick_at: result.last_tick_at,
+          train_boundary_at: result.train_boundary_at, overall: result.overall,
+          in_sample: result.in_sample, out_of_sample: result.out_of_sample,
+          assumptions: result.assumptions, warnings: result.warnings, trade_details: result.trades
+        })
+      });
+      return send(res, 200, { ...result, run_id: saved?.[0]?.id || null });
+    }
+    if (url.pathname === "/api/scalping-history-status") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
       const [earliest, latest] = await Promise.all([
