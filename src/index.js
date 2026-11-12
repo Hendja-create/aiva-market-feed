@@ -39,7 +39,7 @@ async function db(path, options = {}) {
 function send(res, status, body) {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
-    "access-control-allow-origin": "*",
+    "access-control-allow-origin": process.env.DASHBOARD_ORIGIN || "*",
     "access-control-allow-methods": "GET, OPTIONS",
     "access-control-allow-headers": "Content-Type, Authorization"
   });
@@ -78,51 +78,68 @@ async function getAnalysis(symbol) {
   const variance = returns.length > 1 ? returns.reduce((a,b) => a + (b-mean)**2,0) / (returns.length-1) : 0;
   const sigma = Math.sqrt(variance);
   const horizon = 30;
+  const blockLength = 3;
   const simulations = [];
   let up = 0, down = 0, flat = 0, sumMove = 0, adverse = 0;
   if (returns.length >= 2) {
     for (let s = 0; s < 100; s++) {
-      let price = current;
-      for (let step = 0; step < horizon; step++) {
-        const sampled = returns[Math.floor(Math.random() * returns.length)];
-        price *= 1 + sampled;
+      let price = current, pathHigh = current, pathLow = current;
+      for (let step = 0; step < horizon;) {
+        const startIndex = Math.floor(Math.random() * returns.length);
+        for (let j = 0; j < blockLength && step < horizon; j++, step++) {
+          const sampled = returns[(startIndex + j) % returns.length];
+          price *= 1 + sampled;
+          pathHigh = Math.max(pathHigh, price);
+          pathLow = Math.min(pathLow, price);
+        }
       }
       const move = price - current;
+      const maxAdverseMove = move >= 0 ? current - pathLow : pathHigh - current;
+      const maxFavorableMove = move >= 0 ? pathHigh - current : current - pathLow;
       sumMove += move;
       if (move > spread) up++;
       else if (move < -spread) down++;
       else flat++;
-      if (Math.abs(move) > Math.max(spread * 8, current * sigma * Math.sqrt(horizon) * 2.5)) adverse++;
-      simulations.push({ id: s + 1, terminal_price: Number(price.toFixed(3)), move: Number(move.toFixed(3)), outcome: move > spread ? "UP" : move < -spread ? "DOWN" : "FLAT" });
+      if (maxAdverseMove > Math.max(spread * 8, current * sigma * Math.sqrt(horizon) * 2.5)) adverse++;
+      simulations.push({
+        id: s + 1,
+        terminal_price: Number(price.toFixed(3)),
+        move: Number(move.toFixed(3)),
+        max_adverse_move: Number(maxAdverseMove.toFixed(3)),
+        max_favorable_move: Number(maxFavorableMove.toFixed(3)),
+        outcome: move > spread ? "UP" : move < -spread ? "DOWN" : "FLAT"
+      });
     }
   }
   const probabilityUp = up / 100;
   const probabilityDown = down / 100;
+  const probabilityFlat = flat / 100;
   const expectedMove = sumMove / 100;
   const confidence = Math.max(probabilityUp, probabilityDown);
   const expectedRange = current * sigma * Math.sqrt(horizon);
   const spreadRatio = expectedRange > 0 ? spread / expectedRange : 1;
-  const riskScore = Math.min(1, (adverse / 100) * 0.5 + Math.min(1, spreadRatio) * 0.5);
+  const riskScore = Math.min(1, (adverse / 100) * 0.6 + Math.min(1, spreadRatio) * 0.4);
+  const recentMomentum = returns.slice(-10).reduce((a,b) => a+b, 0);
   let decision = "NO_TRADE";
   let rationale = "";
   if (returns.length < 30) {
     rationale = "Historique insuffisant : au moins 30 variations sont nécessaires avant toute décision.";
-  } else if (spreadRatio > 0.35) {
-    rationale = "Spread trop élevé par rapport au mouvement attendu.";
-  } else if (probabilityUp >= 0.62 && expectedMove > spread * 1.5 && riskScore < 0.65) {
+  } else if (spreadRatio > 0.5) {
+    rationale = "Spread trop élevé par rapport au mouvement attendu : entrée bloquée.";
+  } else if (probabilityUp >= 0.65 && probabilityUp - probabilityDown >= 0.25 && expectedMove > spread * 1.5 && riskScore < 0.55 && recentMomentum > 0) {
     decision = "BUY";
-    rationale = "Les scénarios haussiers dominent et le mouvement moyen simulé dépasse le coût du spread.";
-  } else if (probabilityDown >= 0.62 && expectedMove < -spread * 1.5 && riskScore < 0.65) {
+    rationale = "Les trajectoires haussières dominent, le mouvement moyen dépasse le spread et le momentum récent confirme la direction.";
+  } else if (probabilityDown >= 0.65 && probabilityDown - probabilityUp >= 0.25 && expectedMove < -spread * 1.5 && riskScore < 0.55 && recentMomentum < 0) {
     decision = "SELL";
-    rationale = "Les scénarios baissiers dominent et le mouvement moyen simulé dépasse le coût du spread.";
+    rationale = "Les trajectoires baissières dominent, le mouvement moyen dépasse le spread et le momentum récent confirme la direction.";
   } else {
-    rationale = "Les 100 scénarios ne montrent pas d'avantage statistique suffisant. Aucune entrée recommandée.";
+    rationale = "Les 100 trajectoires ne montrent pas d'avantage statistique assez net. Aucune entrée recommandée.";
   }
   const result = {
     symbol, decision, simulations: 100, confidence: Number(confidence.toFixed(4)),
-    probability_up: Number(probabilityUp.toFixed(4)), probability_down: Number(probabilityDown.toFixed(4)),
+    probability_up: Number(probabilityUp.toFixed(4)), probability_down: Number(probabilityDown.toFixed(4)), probability_flat: Number(probabilityFlat.toFixed(4)),
     expected_move: Number(expectedMove.toFixed(4)), risk_score: Number(riskScore.toFixed(4)),
-    rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, model: "bootstrap_monte_carlo_v1" },
+    rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, block_length: blockLength, recent_momentum_10: Number(recentMomentum.toFixed(8)), model: "block_bootstrap_monte_carlo_v2" },
     scenarios: simulations, generated_at: new Date().toISOString()
   };
   await db("market_analysis_runs", {
