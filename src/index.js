@@ -1496,54 +1496,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(Number(process.env.PORT || 3000), "0.0.0.0", () => {
   console.log("HTTP server listening", JSON.stringify(server.address()));
   console.log("Health and API endpoints ready");
-  if (process.env.RUN_M5_ROBUSTNESS_ON_STARTUP === "true") {
-    console.log("One-shot M5 robustness experiment scheduled");
-    setTimeout(async () => {
-      if (scheduledScalpingBacktestRunning) {
-        console.warn("One-shot M5 robustness experiment skipped: scalping backtest already running");
-        return;
-      }
-      scheduledScalpingBacktestRunning = true;
-      try {
-        const commonRange = await getScalpingCommonRange("XAUUSD");
-        if (!commonRange) throw new Error("No common M1/M5 history range");
-        const startMs = new Date(commonRange.start).getTime();
-        const endMs = new Date(commonRange.end).getTime();
-        const span = endMs - startMs;
-        const windows = [
-          { name: "window_1_oldest", start: new Date(startMs).toISOString(), end: new Date(startMs + Math.floor(span / 3)).toISOString() },
-          { name: "window_2_middle", start: new Date(startMs + Math.floor(span / 3)).toISOString(), end: new Date(startMs + Math.floor(2 * span / 3)).toISOString() },
-          { name: "window_3_latest", start: new Date(startMs + Math.floor(2 * span / 3)).toISOString(), end: commonRange.end }
-        ];
-        const configurations = [
-          { stopLoss: 3, takeProfit: 6 },
-          { stopLoss: 5, takeProfit: 8 },
-          { stopLoss: 7, takeProfit: 10 }
-        ];
-        console.log("M5 robustness run started", JSON.stringify({ commonRange, windows, configurations }));
-        for (const window of windows) {
-          for (const config of configurations) {
-            const result = await runM1ScalpingBacktest(
-              db, "XAUUSD", 0.65, 80000, "M5",
-              { start: window.start, end: window.end },
-              config
-            );
-            if (result.available) {
-              result.method = result.method + "_" + window.name;
-              await saveScalpingBacktestResult("XAUUSD", result);
-            } else {
-              console.warn("M5 robustness configuration unavailable", JSON.stringify({ window: window.name, config, warning: result.warning }));
-            }
-          }
-        }
-        console.log("M5 robustness run completed");
-      } catch (error) {
-        console.error("M5 robustness run failed", error instanceof Error ? error.message : String(error));
-      } finally {
-        scheduledScalpingBacktestRunning = false;
-      }
-    }, 120000);
-  }
 });
 
 function parse(raw) {
