@@ -833,7 +833,7 @@ async function saveQuote(q) {
   if (received === 1 || received % 20 === 0) console.log("Quote stored", symbol, "bid", bid, "ask", ask, "latency", row.latency_ms);
 }
 
-const socket = io("https://" + host, { transports: ["websocket"], reconnection: true, reconnectionDelay: 1000, reconnectionDelayMax: 30000, timeout: 20000 });
+const socket = io("https://" + host, { autoConnect: false, transports: ["websocket"], reconnection: true, reconnectionDelay: 1000, reconnectionDelayMax: 30000, timeout: 20000 });
 socket.on("connect", () => {
   connected = true; lastError = null;
   console.log("Socket connected", host, "symbols", symbols.join(","));
@@ -856,6 +856,12 @@ function stop(signal) {
 }
 process.on("SIGTERM", () => stop("SIGTERM"));
 process.on("SIGINT", () => stop("SIGINT"));
+
+const feedConnectDelayMs = Math.max(5000, Math.min(30000, Number(process.env.LIVE_RATES_CONNECT_DELAY_MS || 15000)));
+setTimeout(() => {
+  console.log("Starting Live-Rates connection after deployment grace period", feedConnectDelayMs, "ms");
+  socket.connect();
+}, feedConnectDelayMs).unref();
 
 const autonomousIntervalMs = Math.max(30000, Math.min(300000, Number(process.env.AUTO_ANALYSIS_INTERVAL_MS || 60000)));
 setTimeout(() => { runAutonomousCycle(); }, 20000);
