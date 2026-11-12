@@ -14,6 +14,7 @@ const host = process.env.LIVE_RATES_SOCKET_HOST || "eu-wss.live-rates.com";
 const baseUrl = process.env.SUPABASE_URL.replace(/\/$/, "");
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 let connected = false, lastQuoteAt = null, lastError = null, received = 0;
+const analysisRateLimit = new Map();
 
 async function db(path, options = {}) {
   const response = await fetch(baseUrl + "/rest/v1/" + path, {
@@ -141,6 +142,15 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/analysis") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+      const now = Date.now();
+      const previousRequest = analysisRateLimit.get(clientIp) || 0;
+      const elapsed = now - previousRequest;
+      if (elapsed < 15000) return send(res, 429, { error: "rate_limited", retry_after_ms: 15000 - elapsed });
+      analysisRateLimit.set(clientIp, now);
+      if (analysisRateLimit.size > 2000) {
+        for (const [ip, timestamp] of analysisRateLimit) if (now - timestamp > 60000) analysisRateLimit.delete(ip);
+      }
       const result = await getAnalysis(symbol);
       return send(res, 200, result);
     }
