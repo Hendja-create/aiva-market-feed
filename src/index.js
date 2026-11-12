@@ -1,7 +1,7 @@
 import http from "node:http";
 import { io } from "socket.io-client";
 
-const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"];
+const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
   if (!process.env[key]) {
     console.error("Missing required environment variable:", key);
@@ -13,6 +13,7 @@ const symbols = (process.env.SYMBOLS || "XAUUSD").split(",").map(s => s.trim().t
 const host = process.env.LIVE_RATES_SOCKET_HOST || "eu-wss.live-rates.com";
 const baseUrl = process.env.SUPABASE_URL.replace(/\/$/, "");
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
 let connected = false, lastQuoteAt = null, lastError = null, received = 0;
 const analysisRateLimit = new Map();
 
@@ -40,9 +41,20 @@ function send(res, status, body) {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET, OPTIONS",
-    "access-control-allow-headers": "Content-Type"
+    "access-control-allow-headers": "Content-Type, Authorization"
   });
   res.end(JSON.stringify(body));
+}
+
+async function verifyUserToken(token) {
+  if (!token) return false;
+  const response = await fetch(baseUrl + "/auth/v1/user", {
+    headers: { apikey: publishableKey, Authorization: "Bearer " + token },
+    signal: AbortSignal.timeout(8000)
+  });
+  if (!response.ok) return false;
+  const user = await response.json();
+  return Boolean(user && user.id);
 }
 
 async function getAnalysis(symbol) {
@@ -142,6 +154,9 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/analysis") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
       const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
       const now = Date.now();
       const previousRequest = analysisRateLimit.get(clientIp) || 0;
