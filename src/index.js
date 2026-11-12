@@ -16,6 +16,8 @@ const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
 let connected = false, lastQuoteAt = null, lastError = null, received = 0;
 const analysisRateLimit = new Map();
+let adaptiveConfidenceThreshold = 0.65;
+let autonomousCycleRunning = false;
 
 async function db(path, options = {}) {
   const response = await fetch(baseUrl + "/rest/v1/" + path, {
@@ -126,10 +128,10 @@ async function getAnalysis(symbol) {
     rationale = "Historique insuffisant : au moins 30 variations sont nécessaires avant toute décision.";
   } else if (spreadRatio > 0.5) {
     rationale = "Spread trop élevé par rapport au mouvement attendu : entrée bloquée.";
-  } else if (probabilityUp >= 0.65 && probabilityUp - probabilityDown >= 0.25 && expectedMove > spread * 1.5 && riskScore < 0.55 && recentMomentum > 0) {
+  } else if (probabilityUp >= adaptiveConfidenceThreshold && probabilityUp - probabilityDown >= 0.25 && expectedMove > spread * 1.5 && riskScore < 0.55 && recentMomentum > 0) {
     decision = "BUY";
     rationale = "Les trajectoires haussières dominent, le mouvement moyen dépasse le spread et le momentum récent confirme la direction.";
-  } else if (probabilityDown >= 0.65 && probabilityDown - probabilityUp >= 0.25 && expectedMove < -spread * 1.5 && riskScore < 0.55 && recentMomentum < 0) {
+  } else if (probabilityDown >= adaptiveConfidenceThreshold && probabilityDown - probabilityUp >= 0.25 && expectedMove < -spread * 1.5 && riskScore < 0.55 && recentMomentum < 0) {
     decision = "SELL";
     rationale = "Les trajectoires baissières dominent, le mouvement moyen dépasse le spread et le momentum récent confirme la direction.";
   } else {
@@ -139,7 +141,7 @@ async function getAnalysis(symbol) {
     symbol, decision, simulations: 100, confidence: Number(confidence.toFixed(4)),
     probability_up: Number(probabilityUp.toFixed(4)), probability_down: Number(probabilityDown.toFixed(4)), probability_flat: Number(probabilityFlat.toFixed(4)),
     expected_move: Number(expectedMove.toFixed(4)), risk_score: Number(riskScore.toFixed(4)),
-    rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, block_length: blockLength, recent_momentum_10: Number(recentMomentum.toFixed(8)), model: "block_bootstrap_monte_carlo_v2" },
+    rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, block_length: blockLength, confidence_threshold: adaptiveConfidenceThreshold, recent_momentum_10: Number(recentMomentum.toFixed(8)), model: "block_bootstrap_monte_carlo_v2" },
     scenarios: simulations, generated_at: new Date().toISOString()
   };
   await db("market_analysis_runs", {
@@ -153,6 +155,77 @@ async function getAnalysis(symbol) {
     })
   });
   return result;
+}
+
+async function evaluatePendingAnalyses(symbol) {
+  const pending = await db("market_analysis_runs?symbol=eq." + encodeURIComponent(symbol) +
+    "&evaluated_at=is.null&select=id,decision,features,created_at&order=created_at.asc&limit=25");
+  let evaluated = 0;
+  for (const run of pending) {
+    const startPrice = Number(run.features?.current_price);
+    const spread = Number(run.features?.spread || 0);
+    if (!Number.isFinite(startPrice) || startPrice <= 0) continue;
+    const ticks = await db("market_quote_ticks?symbol=eq." + encodeURIComponent(symbol) +
+      "&received_at=gt." + encodeURIComponent(run.created_at) +
+      "&select=mid&order=received_at.asc&limit=30");
+    if (ticks.length < 30) continue;
+    const endPrice = Number(ticks[29].mid);
+    if (!Number.isFinite(endPrice)) continue;
+    const actualMove = endPrice - startPrice;
+    const actualDirection = actualMove > spread ? "UP" : actualMove < -spread ? "DOWN" : "FLAT";
+    const predictionCorrect = run.decision === "BUY"
+      ? actualDirection === "UP"
+      : run.decision === "SELL"
+        ? actualDirection === "DOWN"
+        : actualDirection === "FLAT";
+    await db("market_analysis_runs?id=eq." + encodeURIComponent(run.id), {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({
+        evaluated_at: new Date().toISOString(),
+        actual_move: Number(actualMove.toFixed(4)),
+        actual_direction: actualDirection,
+        prediction_correct: predictionCorrect,
+        evaluation_ticks: 30
+      })
+    });
+    evaluated++;
+  }
+
+  const history = await db("market_analysis_runs?symbol=eq." + encodeURIComponent(symbol) +
+    "&evaluated_at=not.is.null&select=prediction_correct&order=evaluated_at.desc&limit=100");
+  const reviewed = history.length;
+  const accuracy = reviewed ? history.filter(row => row.prediction_correct === true).length / reviewed : null;
+  if (reviewed >= 30) {
+    if (accuracy < 0.50) adaptiveConfidenceThreshold = 0.75;
+    else if (accuracy < 0.57) adaptiveConfidenceThreshold = 0.72;
+    else if (accuracy > 0.65) adaptiveConfidenceThreshold = 0.65;
+    else adaptiveConfidenceThreshold = 0.68;
+  }
+  return { evaluated, reviewed, accuracy, confidenceThreshold: adaptiveConfidenceThreshold };
+}
+
+async function runAutonomousCycle() {
+  if (autonomousCycleRunning) return;
+  autonomousCycleRunning = true;
+  try {
+    for (const symbol of symbols) {
+      const learning = await evaluatePendingAnalyses(symbol);
+      const analysis = await getAnalysis(symbol);
+      console.log("Autonomous cycle", JSON.stringify({
+        symbol,
+        decision: analysis.decision,
+        simulations: analysis.simulations,
+        learning,
+        generatedAt: analysis.generated_at
+      }));
+    }
+  } catch (error) {
+    lastError = error instanceof Error ? error.message : String(error);
+    console.error("Autonomous cycle failed", lastError);
+  } finally {
+    autonomousCycleRunning = false;
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -256,3 +329,9 @@ function stop(signal) {
 }
 process.on("SIGTERM", () => stop("SIGTERM"));
 process.on("SIGINT", () => stop("SIGINT"));
+
+const autonomousIntervalMs = Math.max(30000, Math.min(300000, Number(process.env.AUTO_ANALYSIS_INTERVAL_MS || 60000)));
+setTimeout(() => { runAutonomousCycle(); }, 20000);
+setInterval(runAutonomousCycle, autonomousIntervalMs);
+console.log("Autonomous analysis scheduler enabled", autonomousIntervalMs, "ms");
+
