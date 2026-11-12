@@ -722,6 +722,12 @@ const server = http.createServer(async (req, res) => {
       const authHeader = String(req.headers.authorization || "");
       const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
       if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
+      const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+      const rateKey = "backtest:" + clientIp;
+      const previousRequest = analysisRateLimit.get(rateKey) || 0;
+      const elapsed = Date.now() - previousRequest;
+      if (elapsed < 60000) return send(res, 429, { error: "backtest_rate_limited", retry_after_ms: 60000 - elapsed });
+      analysisRateLimit.set(rateKey, Date.now());
       const ticks = await loadBacktestTicks(symbol, 10000);
       if (ticks.length < 500) {
         return send(res, 422, {
