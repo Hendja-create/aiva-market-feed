@@ -1345,7 +1345,7 @@ const historicalImportIntervalMs = 24 * 60 * 60 * 1000;
 setTimeout(() => { for (const symbol of symbols) importHistoricalDaily(symbol); }, 45000).unref();
 setInterval(() => { for (const symbol of symbols) importHistoricalDaily(symbol); }, historicalImportIntervalMs);
 console.log("Historical daily import scheduler enabled", historicalImportIntervalMs, "ms");
-const historicalM1ImportIntervalMs = Math.max(300000, Number(process.env.DUKASCOPY_M1_IMPORT_INTERVAL_MS || 300000));
+const historicalM1ImportIntervalMs = Math.max(60000, Number(process.env.DUKASCOPY_M1_IMPORT_INTERVAL_MS || 60000));
 setTimeout(() => { for (const symbol of symbols) runHistoricalM1Import(symbol); }, 60000).unref();
 setInterval(() => { for (const symbol of symbols) runHistoricalM1Import(symbol); }, historicalM1ImportIntervalMs);
 console.log("Dukascopy M1 history importer enabled", historicalM1ImportIntervalMs, "ms");
