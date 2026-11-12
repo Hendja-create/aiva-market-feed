@@ -208,7 +208,7 @@ async function evaluatePendingAnalyses(symbol) {
     "&evaluated_at=not.is.null&decision=in.(BUY,SELL)&select=decision,prediction_correct&order=evaluated_at.desc&limit=100");
   const reviewed = history.length;
   const accuracy = reviewed ? history.filter(row => row.prediction_correct === true).length / reviewed : null;
-  if (reviewed >= 30 && accuracy !== null) {
+  if (reviewed >= 50 && accuracy !== null) {
     if (accuracy < 0.50) adaptiveConfidenceThreshold = 0.75;
     else if (accuracy < 0.57) adaptiveConfidenceThreshold = 0.72;
     else if (accuracy > 0.65) adaptiveConfidenceThreshold = 0.65;
