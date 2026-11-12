@@ -3,6 +3,7 @@ import { io } from "socket.io-client";
 import { importDukascopyM1Chunk, importDukascopyM5Chunk } from "./dukascopy-history.js";
 import { runM1ScalpingBacktest } from "./scalping-backtest.js";
 import { runVolatilityReversalBacktest } from "./volatility-reversal-backtest.js";
+import { runLiquiditySweepBacktest } from "./liquidity-sweep-backtest.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -1134,6 +1135,38 @@ async function saveScalpingBacktestResult(symbol, result) {
   return saved?.[0]?.id || null;
 }
 
+let scheduledLiquiditySweepRunning = false;
+async function runScheduledLiquiditySweep(symbol) {
+  if (scheduledLiquiditySweepRunning) return;
+  scheduledLiquiditySweepRunning = true;
+  try {
+    const result = await runLiquiditySweepBacktest(db, symbol, "M5", 80000);
+    if (!result.available) {
+      console.log("Liquidity sweep research waiting for history", JSON.stringify(result));
+      return;
+    }
+    const saved = await db("aiva_backtest_runs", {
+      method: "POST", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        symbol, method: result.method, data_points: result.data_points,
+        first_tick_at: result.first_tick_at, last_tick_at: result.last_tick_at,
+        train_boundary_at: result.train_boundary_at, overall: result.overall,
+        in_sample: result.in_sample, out_of_sample: result.out_of_sample,
+        assumptions: { ...result.assumptions, experiment_group: "liquidity_sweep_research_v1" },
+        warnings: result.warnings, trade_details: result.trades
+      })
+    });
+    console.log("Liquidity sweep research saved", JSON.stringify({
+      symbol, overall: result.overall, out_of_sample: result.out_of_sample,
+      by_direction: result.by_direction, warnings: result.warnings, run_id: saved?.[0]?.id || null
+    }));
+  } catch (error) {
+    console.error("Liquidity sweep research failed", error instanceof Error ? error.message : String(error));
+  } finally {
+    scheduledLiquiditySweepRunning = false;
+  }
+}
+
 let scheduledVolatilityReversalRunning = false;
 async function runScheduledVolatilityReversal(symbol) {
   if (scheduledVolatilityReversalRunning) return;
@@ -1244,6 +1277,34 @@ const server = http.createServer(async (req, res) => {
       if (elapsed < 900000) return send(res, 429, { error: "strategy_test_rate_limited", retry_after_ms: 900000 - elapsed });
       analysisRateLimit.set(rateKey, Date.now());
       const result = await runVolatilityReversalBacktest(db, symbol, timeframe, timeframe === "M1" ? 120000 : 80000);
+      if (!result.available) return send(res, 422, result);
+      const saved = await db("aiva_backtest_runs", {
+        method: "POST", headers: { Prefer: "return=representation" },
+        body: JSON.stringify({
+          symbol, method: result.method, data_points: result.data_points,
+          first_tick_at: result.first_tick_at, last_tick_at: result.last_tick_at,
+          train_boundary_at: result.train_boundary_at, overall: result.overall,
+          in_sample: result.in_sample, out_of_sample: result.out_of_sample,
+          assumptions: result.assumptions, warnings: result.warnings, trade_details: result.trades
+        })
+      });
+      return send(res, 200, { ...result, run_id: saved?.[0]?.id || null });
+    }
+    if (url.pathname === "/api/liquidity-sweep-backtest") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const timeframe = (url.searchParams.get("timeframe") || "M5").toUpperCase();
+      if (timeframe !== "M5") return send(res, 400, { error: "research_timeframe_must_be_M5" });
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
+      const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+      const rateKey = "liquidity-sweep:" + clientIp;
+      const previousRequest = analysisRateLimit.get(rateKey) || 0;
+      const elapsed = Date.now() - previousRequest;
+      if (elapsed < 900000) return send(res, 429, { error: "strategy_test_rate_limited", retry_after_ms: 900000 - elapsed });
+      analysisRateLimit.set(rateKey, Date.now());
+      const result = await runLiquiditySweepBacktest(db, symbol, timeframe, 80000);
       if (!result.available) return send(res, 422, result);
       const saved = await db("aiva_backtest_runs", {
         method: "POST", headers: { Prefer: "return=representation" },
@@ -1667,3 +1728,7 @@ const volatilityReversalIntervalMs = Math.max(60 * 60 * 1000, Number(process.env
 setTimeout(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, 15000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, volatilityReversalIntervalMs);
 console.log("Experimental volatility reversal research scheduler enabled", volatilityReversalIntervalMs, "ms");
+const liquiditySweepIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.LIQUIDITY_SWEEP_INTERVAL_MS || 21600000));
+setTimeout(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, 45000).unref();
+setInterval(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, liquiditySweepIntervalMs);
+console.log("Experimental liquidity sweep research scheduler enabled", liquiditySweepIntervalMs, "ms");
