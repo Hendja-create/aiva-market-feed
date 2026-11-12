@@ -136,24 +136,58 @@ async function getAnalysis(symbol) {
   const recentMomentum = returns.slice(-10).reduce((a,b) => a+b, 0);
   let decision = "NO_TRADE";
   let rationale = "";
-  if (returns.length < 30) {
-    rationale = "Historique insuffisant : au moins 30 variations sont nécessaires avant toute décision.";
-  } else if (spreadRatio > 0.5) {
-    rationale = "Spread trop élevé par rapport au mouvement attendu : entrée bloquée.";
-  } else if (probabilityUp >= adaptiveConfidenceThreshold && probabilityUp - probabilityDown >= 0.25 && expectedMove > spread * 1.5 && riskScore < 0.55 && recentMomentum > 0) {
-    decision = "BUY";
-    rationale = "Les trajectoires haussières dominent, le mouvement moyen dépasse le spread et le momentum récent confirme la direction.";
-  } else if (probabilityDown >= adaptiveConfidenceThreshold && probabilityDown - probabilityUp >= 0.25 && expectedMove < -spread * 1.5 && riskScore < 0.55 && recentMomentum < 0) {
-    decision = "SELL";
-    rationale = "Les trajectoires baissières dominent, le mouvement moyen dépasse le spread et le momentum récent confirme la direction.";
+  const candidateDirection = probabilityUp >= probabilityDown ? "BUY" : "SELL";
+  const candidateProbability = candidateDirection === "BUY" ? probabilityUp : probabilityDown;
+  const probabilityGap = Math.abs(probabilityUp - probabilityDown);
+  const expectedMoveAligned = candidateDirection === "BUY" ? expectedMove : -expectedMove;
+  const momentumAligned = candidateDirection === "BUY" ? recentMomentum > 0 : recentMomentum < 0;
+  const decisionChecks = {
+    enough_history: returns.length >= 30,
+    acceptable_spread: spreadRatio <= 0.5,
+    confidence: candidateProbability >= adaptiveConfidenceThreshold,
+    directional_dominance: probabilityGap >= 0.25,
+    expected_move_covers_spread: expectedMoveAligned > spread * 1.5,
+    acceptable_risk: riskScore < 0.55,
+    momentum_confirmation: momentumAligned
+  };
+  const blockingReasons = Object.entries(decisionChecks)
+    .filter(([, passed]) => !passed)
+    .map(([key]) => key);
+  const decisionDiagnostics = {
+    candidate_direction: candidateDirection,
+    candidate_probability: Number(candidateProbability.toFixed(4)),
+    probability_gap: Number(probabilityGap.toFixed(4)),
+    confidence_threshold: adaptiveConfidenceThreshold,
+    spread_ratio: Number(spreadRatio.toFixed(4)),
+    expected_move_aligned: Number(expectedMoveAligned.toFixed(4)),
+    required_move: Number((spread * 1.5).toFixed(4)),
+    risk_score: Number(riskScore.toFixed(4)),
+    recent_momentum_10: Number(recentMomentum.toFixed(8)),
+    checks: decisionChecks,
+    blocking_reasons: blockingReasons
+  };
+  if (blockingReasons.length === 0) {
+    decision = candidateDirection;
+    rationale = candidateDirection === "BUY"
+      ? "Les trajectoires haussières dominent et tous les filtres de validation sont satisfaits."
+      : "Les trajectoires baissières dominent et tous les filtres de validation sont satisfaits.";
   } else {
-    rationale = "Les 100 trajectoires ne montrent pas d'avantage statistique assez net. Aucune entrée recommandée.";
+    const labels = {
+      enough_history: "historique insuffisant",
+      acceptable_spread: "spread trop élevé",
+      confidence: "confiance sous le seuil",
+      directional_dominance: "écart directionnel insuffisant",
+      expected_move_covers_spread: "mouvement attendu insuffisant face au spread",
+      acceptable_risk: "risque estimé trop élevé",
+      momentum_confirmation: "momentum non confirmé"
+    };
+    rationale = "NO_TRADE : " + blockingReasons.map(key => labels[key]).join(", ") + ".";
   }
   const result = {
     symbol, decision, simulations: 100, confidence: Number(confidence.toFixed(4)),
     probability_up: Number(probabilityUp.toFixed(4)), probability_down: Number(probabilityDown.toFixed(4)), probability_flat: Number(probabilityFlat.toFixed(4)),
     expected_move: Number(expectedMove.toFixed(4)), risk_score: Number(riskScore.toFixed(4)),
-    rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, block_length: blockLength, confidence_threshold: adaptiveConfidenceThreshold, recent_momentum_10: Number(recentMomentum.toFixed(8)), model: "block_bootstrap_monte_carlo_v2" },
+    rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, block_length: blockLength, confidence_threshold: adaptiveConfidenceThreshold, recent_momentum_10: Number(recentMomentum.toFixed(8)), decision_diagnostics: decisionDiagnostics, model: "block_bootstrap_monte_carlo_v2" },
     scenarios: simulations, generated_at: new Date().toISOString()
   };
   const saved = await db("market_analysis_runs", {
@@ -770,15 +804,44 @@ const server = http.createServer(async (req, res) => {
     }    if (url.pathname === "/api/autonomous-status") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
-      const rows = await db("aiva_learning_state?symbol=eq." + encodeURIComponent(symbol) +
-        "&select=symbol,confidence_threshold,evaluated_directional,directional_accuracy,updated_at,last_cycle_at,last_decision&limit=1");
-      return send(res, 200, rows[0] || {
+      const [rows, recentAnalyses] = await Promise.all([
+        db("aiva_learning_state?symbol=eq." + encodeURIComponent(symbol) +
+          "&select=symbol,confidence_threshold,evaluated_directional,directional_accuracy,updated_at,last_cycle_at,last_decision&limit=1"),
+        db("market_analysis_runs?symbol=eq." + encodeURIComponent(symbol) +
+          "&select=id,decision,confidence,probability_up,probability_down,expected_move,risk_score,rationale,features,created_at&order=created_at.desc&limit=30")
+      ]);
+      const latestAnalysis = recentAnalyses[0] || null;
+      const blockerCounts = {};
+      for (const run of recentAnalyses.filter(item => item.decision === "NO_TRADE")) {
+        for (const reason of run.features?.decision_diagnostics?.blocking_reasons || []) {
+          blockerCounts[reason] = (blockerCounts[reason] || 0) + 1;
+        }
+      }
+      const state = rows[0] || {
         symbol,
         confidence_threshold: adaptiveConfidenceThreshold,
         evaluated_directional: 0,
         directional_accuracy: null,
         last_cycle_at: null,
         last_decision: null
+      };
+      return send(res, 200, {
+        ...state,
+        latest_analysis: latestAnalysis ? {
+          id: latestAnalysis.id,
+          decision: latestAnalysis.decision,
+          confidence: latestAnalysis.confidence,
+          probability_up: latestAnalysis.probability_up,
+          probability_down: latestAnalysis.probability_down,
+          expected_move: latestAnalysis.expected_move,
+          risk_score: latestAnalysis.risk_score,
+          rationale: latestAnalysis.rationale,
+          diagnostics: latestAnalysis.features?.decision_diagnostics || null,
+          created_at: latestAnalysis.created_at
+        } : null,
+        recent_no_trade_count: recentAnalyses.filter(item => item.decision === "NO_TRADE").length,
+        recent_analysis_count: recentAnalyses.length,
+        blocker_counts: blockerCounts
       });
     }
     if (url.pathname === "/api/demo-history") {
