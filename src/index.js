@@ -1840,6 +1840,40 @@ const volatilityReversalIntervalMs = Math.max(60 * 60 * 1000, Number(process.env
 setTimeout(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, 15000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, volatilityReversalIntervalMs);
 console.log("Experimental volatility reversal research scheduler enabled", volatilityReversalIntervalMs, "ms");
+let inverseKeltnerBacktestRunning = false;
+async function runScheduledInverseKeltnerBacktest(symbol) {
+  if (inverseKeltnerBacktestRunning) return;
+  inverseKeltnerBacktestRunning = true;
+  try {
+    const result = await runInverseKeltnerBacktest(db, symbol, 80000);
+    if (!result.available) {
+      console.log("Inverse Keltner backtest waiting for history", JSON.stringify(result));
+      return;
+    }
+    const saved = await db("aiva_backtest_runs", {
+      method: "POST", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        symbol, method: "aiva_inverse_keltner_1_5_atr_v1",
+        data_points: result.data_points, first_tick_at: result.first_candle_at,
+        last_tick_at: result.last_candle_at,
+        train_boundary_at: result.trades.find(t => t.sample === "out_of_sample")?.signal_time || null,
+        overall: result.overall, in_sample: result.in_sample, out_of_sample: result.out_of_sample,
+        assumptions: { ...result.assumptions, experiment_group: "inverse_keltner_demo_research_v1",
+          strategy: result.strategy, by_direction: result.by_direction },
+        warnings: result.warnings, trade_details: result.trades
+      })
+    });
+    console.log("Inverse Keltner backtest saved", JSON.stringify({
+      symbol, overall: result.overall, out_of_sample: result.out_of_sample,
+      by_direction: result.by_direction, run_id: saved?.[0]?.id || null
+    }));
+  } catch (error) {
+    console.error("Inverse Keltner backtest failed", error instanceof Error ? error.message : String(error));
+  } finally {
+    inverseKeltnerBacktestRunning = false;
+  }
+}
+
 let inverseKeltnerDemoRunning = false;
 async function runScheduledInverseKeltnerDemo(symbol) {
   if (inverseKeltnerDemoRunning) return;
@@ -1861,6 +1895,10 @@ const inverseKeltnerDemoIntervalMs = Math.max(15000, Number(process.env.INVERSE_
 setTimeout(() => { for (const symbol of symbols) runScheduledInverseKeltnerDemo(symbol); }, 60000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledInverseKeltnerDemo(symbol); }, inverseKeltnerDemoIntervalMs);
 console.log("Inverse Keltner paper demo scheduler enabled", inverseKeltnerDemoIntervalMs, "ms; real orders disabled");
+const inverseKeltnerBacktestIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.INVERSE_KELTNER_BACKTEST_INTERVAL_MS || 21600000));
+setTimeout(() => { for (const symbol of symbols) runScheduledInverseKeltnerBacktest(symbol); }, 180000).unref();
+setInterval(() => { for (const symbol of symbols) runScheduledInverseKeltnerBacktest(symbol); }, inverseKeltnerBacktestIntervalMs);
+console.log("Inverse Keltner research backtest scheduler enabled", inverseKeltnerBacktestIntervalMs, "ms");
 const liquiditySweepIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.LIQUIDITY_SWEEP_INTERVAL_MS || 21600000));
 setTimeout(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, 45000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, liquiditySweepIntervalMs);
