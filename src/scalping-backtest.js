@@ -68,6 +68,14 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
   const pageSize = 1000;
   const concurrency = 10;
   const newestFirst = [];
+  const latestRows = await db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
+    "&timeframe=eq.M1&select=candle_at&order=candle_at.desc&limit=1");
+  const cutoff = latestRows[0]?.candle_at;
+  if (!cutoff) {
+    return { available: false, symbol, timeframe: "M1", data_points: 0,
+      required_data_points: 5000, warning: "Aucune bougie M1 disponible." };
+  }
+  const cutoffFilter = "&candle_at=lte." + encodeURIComponent(cutoff);
 
   for (let offset = 0; offset < maxRows; offset += pageSize * concurrency) {
     const offsets = Array.from({ length: concurrency }, (_, i) => offset + i * pageSize)
@@ -75,7 +83,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
     const pages = await Promise.all(offsets.map(pageOffset =>
       db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
         "&timeframe=eq.M1&select=candle_at,bid_open,bid_high,bid_low,bid_close,ask_open,ask_high,ask_low,ask_close,spread_close" +
-        "&order=candle_at.desc&limit=" + pageSize + "&offset=" + pageOffset)
+        cutoffFilter + "&order=candle_at.desc&limit=" + pageSize + "&offset=" + pageOffset)
     ));
     for (const page of pages) newestFirst.push(...page);
     if (pages.some(page => page.length < pageSize) || newestFirst.length >= maxRows) break;
