@@ -69,7 +69,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
   const concurrency = 10;
   const newestFirst = [];
   const latestRows = await db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
-    "&timeframe=eq.M1&select=candle_at&order=candle_at.desc&limit=1");
+    "&timeframe=eq." + timeframe + "&select=candle_at&order=candle_at.desc&limit=1");
   const cutoff = latestRows[0]?.candle_at;
   if (!cutoff) {
     return { available: false, symbol, timeframe: "M1", data_points: 0,
@@ -82,7 +82,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
       .filter(value => value < maxRows);
     const pages = await Promise.all(offsets.map(pageOffset =>
       db("aiva_historical_m1?symbol=eq." + encodeURIComponent(symbol) +
-        "&timeframe=eq.M1&select=candle_at,bid_open,bid_high,bid_low,bid_close,ask_open,ask_high,ask_low,ask_close,spread_close" +
+        "&timeframe=eq." + timeframe + "&select=candle_at,bid_open,bid_high,bid_low,bid_close,ask_open,ask_high,ask_low,ask_close,spread_close" +
         cutoffFilter + "&order=candle_at.desc&limit=" + pageSize + "&offset=" + pageOffset)
     ));
     for (const page of pages) newestFirst.push(...page);
@@ -93,48 +93,13 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
     new Date(a.candle_at).getTime() - new Date(b.candle_at).getTime()
   ).slice(-maxRows);
 
-  let candles = rawCandles;
-  if (timeframe === "M5") {
-    const buckets = new Map();
-    for (const row of rawCandles) {
-      const timestamp = new Date(row.candle_at).getTime();
-      const bucket = Math.floor(timestamp / 300000) * 300000;
-      if (!buckets.has(bucket)) buckets.set(bucket, []);
-      buckets.get(bucket).push(row);
-    }
-    candles = [];
-    for (const [bucket, rows] of buckets) {
-      rows.sort((a, b) => new Date(a.candle_at).getTime() - new Date(b.candle_at).getTime());
-      if (rows.length !== 5) continue;
-      let consecutive = true;
-      for (let i = 1; i < rows.length; i++) {
-        if (new Date(rows[i].candle_at).getTime() - new Date(rows[i - 1].candle_at).getTime() !== 60000) {
-          consecutive = false;
-          break;
-        }
-      }
-      if (!consecutive || new Date(rows[0].candle_at).getTime() !== bucket) continue;
-      const first = rows[0], last = rows[4];
-      candles.push({
-        candle_at: new Date(bucket).toISOString(),
-        bid_open: Number(first.bid_open),
-        bid_high: Math.max(...rows.map(r => Number(r.bid_high))),
-        bid_low: Math.min(...rows.map(r => Number(r.bid_low))),
-        bid_close: Number(last.bid_close),
-        ask_open: Number(first.ask_open),
-        ask_high: Math.max(...rows.map(r => Number(r.ask_high))),
-        ask_low: Math.min(...rows.map(r => Number(r.ask_low))),
-        ask_close: Number(last.ask_close),
-        spread_close: Number(last.ask_close) - Number(last.bid_close)
-      });
-    }
-  }
+  const candles = rawCandles;
 
   if (candles.length < 5000) {
     return {
       available: false, symbol, timeframe, data_points: candles.length,
       required_data_points: 5000,
-      warning: "Historique M1 encore insuffisant pour un backtest exploitable."
+      warning: `Historique ${timeframe} encore insuffisant pour un backtest exploitable.`
     };
   }
 
