@@ -123,10 +123,24 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
     await upsertState(db,symbol,{last_processed_candle_at:closed.at(-1).candle_at,last_tick_at:lastTickAt,status:"DEMO_INITIALIZED"});
     return {status:"DEMO_INITIALIZED",baseline_candle_at:closed.at(-1).candle_at,closed_candles:closed.length};
   }
+  const lastProcessedMs=state.last_processed_candle_at?Date.parse(state.last_processed_candle_at):0;
+  const newestClosedMs=Date.parse(closed.at(-1).candle_at);
   const openRows=await db("aiva_inverse_demo_trades?strategy_key=eq."+STRATEGY_KEY+"&symbol=eq."+encodeURIComponent(symbol)+"&status=eq.OPEN&select=*&order=entry_at.desc&limit=1");
+  if(lastProcessedMs && newestClosedMs-lastProcessedMs>600000){
+    const staleOpen=openRows[0]||null;
+    if(staleOpen){
+      const buy=staleOpen.direction==="BUY",exit=(buy?Number(last.bid):Number(last.ask))+(buy?-COSTS.slippageEachSide:COSTS.slippageEachSide);
+      const pnl=(buy?1:-1)*(exit-Number(staleOpen.entry_price))-COSTS.commissionRoundTrip;
+      await db("aiva_inverse_demo_trades?id=eq."+staleOpen.id,{method:"PATCH",headers:{Prefer:"return=minimal"},
+        body:JSON.stringify({status:"CLOSED",exit_at:lastTickAt,exit_price:Number(exit.toFixed(4)),
+          pnl_points:Number(pnl.toFixed(4)),close_reason:"feed_gap_liquidation",closed_at:new Date().toISOString()})});
+    }
+    await upsertState(db,symbol,{last_processed_candle_at:closed.at(-1).candle_at,last_tick_at:lastTickAt,status:"RESYNCED_AFTER_FEED_GAP"});
+    return {status:"RESYNCED_AFTER_FEED_GAP",closed_open_trade:Boolean(staleOpen),baseline_candle_at:closed.at(-1).candle_at};
+  }
   let open=openRows[0]||null,closedCount=0;
   if(open){
-    const entryMs=Date.parse(open.entry_at),lastExitCandle=Date.parse(open.context?.last_exit_candle_at||0);
+    const entryMs=Date.parse(open.entry_at),lastExitCandle=open.context?.last_exit_candle_at?Date.parse(open.context.last_exit_candle_at):0;
     const after=closed.filter(c=>Date.parse(c.candle_at)>Math.max(Math.floor(entryMs/300000)*300000,lastExitCandle));
     for(const bar of after){
       const buy=open.direction==="BUY",stop=buy?bar.bid_low<=Number(open.stop_price):bar.ask_high>=Number(open.stop_price);
