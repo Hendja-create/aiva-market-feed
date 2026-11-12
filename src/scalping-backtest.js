@@ -64,7 +64,7 @@ function validCandle(row) {
     Number.isFinite(new Date(row.candle_at).getTime());
 }
 
-export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThreshold = 0.65, maxRows = 80000, timeframe = "M1") {
+export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThreshold = 0.65, maxRows = 80000, timeframe = "M1", dateRange = null) {
   const pageSize = 1000;
   const concurrency = 10;
   const newestFirst = [];
@@ -75,7 +75,9 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
     return { available: false, symbol, timeframe: "M1", data_points: 0,
       required_data_points: 5000, warning: "Aucune bougie M1 disponible." };
   }
-  const cutoffFilter = "&candle_at=lte." + encodeURIComponent(cutoff);
+  const effectiveEnd = dateRange?.end && new Date(dateRange.end) < new Date(cutoff) ? dateRange.end : cutoff;
+  const cutoffFilter = "&candle_at=lte." + encodeURIComponent(effectiveEnd) +
+    (dateRange?.start ? "&candle_at=gte." + encodeURIComponent(dateRange.start) : "");
 
   for (let offset = 0; offset < maxRows; offset += pageSize * concurrency) {
     const offsets = Array.from({ length: concurrency }, (_, i) => offset + i * pageSize)
