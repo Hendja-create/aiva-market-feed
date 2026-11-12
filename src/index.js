@@ -222,7 +222,10 @@ function localDateKey(date) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Kinshasa", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 function isoWeekKey(date) {
-  const d = new Date(date);
+  // Group by the calendar date shown to users in Kinshasa, not the UTC date.
+  // Using UTC noon avoids shifting the local date around midnight boundaries.
+  const localDay = localDateKey(date);
+  const d = new Date(localDay + "T12:00:00.000Z");
   const weekday = (d.getUTCDay() + 6) % 7;
   d.setUTCDate(d.getUTCDate() - weekday + 3);
   const firstThursday = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
