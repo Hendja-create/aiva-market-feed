@@ -1138,26 +1138,38 @@ let scheduledVolatilityReversalRunning = false;
 async function runScheduledVolatilityReversal(symbol) {
   if (scheduledVolatilityReversalRunning) return;
   scheduledVolatilityReversalRunning = true;
+  const experiments = [
+    { name: "baseline_control", overrides: {} },
+    { name: "liquid_hours_07_20_utc", overrides: { sessionStartHourUtc: 7, sessionEndHourUtc: 20 } },
+    { name: "london_ny_overlap_12_16_utc", overrides: { sessionStartHourUtc: 12, sessionEndHourUtc: 16 } },
+    { name: "stronger_confirmation_050", overrides: { minConfirmationBodyRatio: 0.50 } }
+  ];
   try {
-    const result = await runVolatilityReversalBacktest(db, symbol, "M5", 80000);
-    if (!result.available) {
-      console.log("Volatility reversal research waiting for history", JSON.stringify(result));
-      return;
+    for (const experiment of experiments) {
+      const result = await runVolatilityReversalBacktest(db, symbol, "M5", 80000, null, experiment.overrides);
+      if (!result.available) {
+        console.log("Volatility reversal research waiting for history", JSON.stringify({ experiment: experiment.name, ...result }));
+        continue;
+      }
+      const method = result.method + "_" + experiment.name;
+      const saved = await db("aiva_backtest_runs", {
+        method: "POST", headers: { Prefer: "return=representation" },
+        body: JSON.stringify({
+          symbol, method, data_points: result.data_points,
+          first_tick_at: result.first_tick_at, last_tick_at: result.last_tick_at,
+          train_boundary_at: result.train_boundary_at, overall: result.overall,
+          in_sample: result.in_sample, out_of_sample: result.out_of_sample,
+          assumptions: { ...result.assumptions, experiment: experiment.name, experiment_group: "volatility_reversal_filter_research_v1" },
+          warnings: [...result.warnings, "Comparaison exploratoire de filtres ; aucun paramètre n'est activé dans le moteur autonome."],
+          trade_details: result.trades
+        })
+      });
+      console.log("Volatility reversal filter experiment saved", JSON.stringify({
+        symbol, experiment: experiment.name, overall: result.overall,
+        out_of_sample: result.out_of_sample, warnings: result.warnings,
+        run_id: saved?.[0]?.id || null
+      }));
     }
-    const saved = await db("aiva_backtest_runs", {
-      method: "POST", headers: { Prefer: "return=representation" },
-      body: JSON.stringify({
-        symbol, method: result.method, data_points: result.data_points,
-        first_tick_at: result.first_tick_at, last_tick_at: result.last_tick_at,
-        train_boundary_at: result.train_boundary_at, overall: result.overall,
-        in_sample: result.in_sample, out_of_sample: result.out_of_sample,
-        assumptions: result.assumptions, warnings: result.warnings, trade_details: result.trades
-      })
-    });
-    console.log("Volatility reversal research saved", JSON.stringify({
-      symbol, overall: result.overall, out_of_sample: result.out_of_sample,
-      warnings: result.warnings, run_id: saved?.[0]?.id || null
-    }));
   } catch (error) {
     console.error("Volatility reversal research failed", error instanceof Error ? error.message : String(error));
   } finally {
