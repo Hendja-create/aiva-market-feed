@@ -153,6 +153,12 @@ export async function runStrategyTournament(db, symbol="XAUUSD", timeframe="M5",
         if(stop){exitIndex=j;rawExit=buy?entry-sl:entry+sl;reason="stop";break;}
         if(target){exitIndex=j;rawExit=buy?entry+tp:entry-tp;reason="target";break;}
       }
+      // Force-flat any training trade at the final in-sample candle; never let an IS position leak into OOS.
+      if (i < split && exitIndex >= split) {
+        exitIndex = split - 1;
+        rawExit = buy ? candles[exitIndex].bid_close : candles[exitIndex].ask_close;
+        reason = "forced_flat_at_train_test_boundary";
+      }
       const exit=rawExit+(buy?-0.05:0.05), pnl=(buy?1:-1)*(exit-entry)-0.20;
       trades.push({direction,signal_time:candles[i].candle_at,entry_time:entryBar.candle_at,exit_time:candles[exitIndex].candle_at,
         entry_price:Number(entry.toFixed(4)),exit_price:Number(exit.toFixed(4)),pnl_points:Number(pnl.toFixed(4)),
