@@ -18,6 +18,17 @@ let connected = false, lastQuoteAt = null, lastError = null, received = 0;
 const analysisRateLimit = new Map();
 let adaptiveConfidenceThreshold = 0.65;
 let autonomousCycleRunning = false;
+async function loadAdaptiveState(symbol) {
+  const rows = await db("aiva_learning_state?symbol=eq." + encodeURIComponent(symbol) +
+    "&select=confidence_threshold&limit=1");
+  if (rows.length) {
+    const stored = Number(rows[0].confidence_threshold);
+    if (Number.isFinite(stored) && stored >= 0.50 && stored <= 0.85) {
+      adaptiveConfidenceThreshold = stored;
+    }
+  }
+}
+
 
 async function db(path, options = {}) {
   const response = await fetch(baseUrl + "/rest/v1/" + path, {
@@ -210,8 +221,23 @@ async function runAutonomousCycle() {
   autonomousCycleRunning = true;
   try {
     for (const symbol of symbols) {
+      await loadAdaptiveState(symbol);
       const learning = await evaluatePendingAnalyses(symbol);
       const analysis = await getAnalysis(symbol);
+      await db("aiva_learning_state?on_conflict=symbol", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({
+          symbol,
+          confidence_threshold: adaptiveConfidenceThreshold,
+          evaluated_directional: learning.reviewedDirectional,
+          directional_accuracy: learning.accuracy,
+          updated_at: new Date().toISOString(),
+          last_cycle_at: new Date().toISOString(),
+          last_decision: analysis.decision,
+          last_error: null
+        })
+      });
       console.log("Autonomous cycle", JSON.stringify({
         symbol,
         decision: analysis.decision,
