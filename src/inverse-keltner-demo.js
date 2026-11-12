@@ -158,7 +158,10 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
           body:JSON.stringify({status:"CLOSED",exit_at:new Date(Date.parse(bar.candle_at)+300000).toISOString(),
             exit_price:Number(exit.toFixed(4)),pnl_points:Number(pnl.toFixed(4)),close_reason:reason,
             closed_at:new Date().toISOString(),context:{...open.context,bars_held:held,last_exit_candle_at:bar.candle_at}})});
-        closedCount++;open=null;break;
+        closedCount++;open=null;
+        await upsertState(db,symbol,{last_processed_candle_at:bar.candle_at,last_tick_at:lastTickAt,status:"DEMO_RUNNING"});
+        state.last_processed_candle_at=bar.candle_at;
+        break;
       }else{
         await db("aiva_inverse_demo_trades?id=eq."+open.id,{method:"PATCH",headers:{Prefer:"return=minimal"},
           body:JSON.stringify({context:{...open.context,bars_held:held}})});
@@ -177,6 +180,8 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
           body:JSON.stringify({status:"CLOSED",exit_at:lastTickAt,exit_price:Number(exit.toFixed(4)),pnl_points:Number(pnl.toFixed(4)),
             close_reason:reason,closed_at:new Date().toISOString()})});
         closedCount++;open=null;
+        await upsertState(db,symbol,{last_processed_candle_at:closed.at(-1).candle_at,last_tick_at:lastTickAt,status:"DEMO_RUNNING"});
+        state.last_processed_candle_at=closed.at(-1).candle_at;
       }
     }
   }
