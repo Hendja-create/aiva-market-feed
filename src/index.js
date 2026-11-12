@@ -155,9 +155,9 @@ async function getAnalysis(symbol) {
     rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, block_length: blockLength, confidence_threshold: adaptiveConfidenceThreshold, recent_momentum_10: Number(recentMomentum.toFixed(8)), model: "block_bootstrap_monte_carlo_v2" },
     scenarios: simulations, generated_at: new Date().toISOString()
   };
-  await db("market_analysis_runs", {
+  const saved = await db("market_analysis_runs", {
     method: "POST",
-    headers: { Prefer: "return=minimal" },
+    headers: { Prefer: "return=representation" },
     body: JSON.stringify({
       symbol, decision, simulations: 100, confidence: result.confidence,
       probability_up: result.probability_up, probability_down: result.probability_down,
@@ -165,6 +165,7 @@ async function getAnalysis(symbol) {
       rationale, features: result.features, scenarios: simulations
     })
   });
+  result.id = saved?.[0]?.id || null;
   return result;
 }
 
@@ -216,6 +217,109 @@ async function evaluatePendingAnalyses(symbol) {
   return { evaluated, reviewedDirectional: reviewed, accuracy, confidenceThreshold: adaptiveConfidenceThreshold };
 }
 
+
+function localDateKey(date) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Kinshasa", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+function isoWeekKey(date) {
+  const d = new Date(date);
+  const weekday = (d.getUTCDay() + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - weekday + 3);
+  const firstThursday = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+  const week = 1 + Math.round(((d - firstThursday) / 86400000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7);
+  return d.getUTCFullYear() + "-W" + String(week).padStart(2, "0");
+}
+function periodKey(date, period) {
+  const day = localDateKey(date);
+  return period === "monthly" ? day.slice(0, 7) : period === "weekly" ? isoWeekKey(date) : day;
+}
+async function manageDemoTrade(symbol, analysis) {
+  if (String(process.env.DEMO_TRADING_ENABLED || "true").toLowerCase() !== "true") return { mode: "disabled" };
+  const openRows = await db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) + "&status=eq.OPEN&select=id,direction,entry_price,opened_at&order=opened_at.asc&limit=1");
+  if (openRows.length) {
+    const trade = openRows[0];
+    const ticks = await db("market_quote_ticks?symbol=eq." + encodeURIComponent(symbol) +
+      "&received_at=gt." + encodeURIComponent(trade.opened_at) +
+      "&select=bid,ask,mid,received_at&order=received_at.asc&limit=30");
+    if (ticks.length >= 30) {
+      const exitTick = ticks[29];
+      const exitPrice = Number(trade.direction === "BUY" ? exitTick.bid : exitTick.ask);
+      const entryPrice = Number(trade.entry_price);
+      const pnl = (trade.direction === "BUY" ? 1 : -1) * (exitPrice - entryPrice);
+      await db("aiva_demo_trades?id=eq." + encodeURIComponent(trade.id), {
+        method: "PATCH", headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({
+          exit_price: exitPrice, pnl_points: Number(pnl.toFixed(4)),
+          status: "CLOSED", closed_at: new Date().toISOString(),
+          close_reason: "Horizon de 30 cotations atteint"
+        })
+      });
+      console.log("Demo trade closed", JSON.stringify({ symbol, direction: trade.direction, pnl_points: Number(pnl.toFixed(4)) }));
+      return { mode: "demo", closed: true, pnl_points: Number(pnl.toFixed(4)) };
+    }
+    return { mode: "demo", open: true, waiting_ticks: Math.max(0, 30 - ticks.length) };
+  }
+  if (!analysis || !["BUY", "SELL"].includes(analysis.decision)) return { mode: "demo", opened: false, reason: "NO_TRADE" };
+  const quotes = await db("market_quotes?symbol=eq." + encodeURIComponent(symbol) + "&select=bid,ask,mid,received_at&limit=1");
+  const q = quotes[0];
+  if (!q || Date.now() - new Date(q.received_at).getTime() > 90000) return { mode: "demo", opened: false, reason: "stale_quote" };
+  const entry = Number(analysis.decision === "BUY" ? q.ask : q.bid);
+  const saved = await db("aiva_demo_trades", {
+    method: "POST", headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
+      symbol, direction: analysis.decision, entry_price: entry, quantity: 1,
+      analysis_id: analysis.id || null, context: {
+        confidence: analysis.confidence, risk_score: analysis.risk_score,
+        simulations: analysis.simulations, model: analysis.features?.model || "unknown"
+      }
+    })
+  });
+  console.log("Demo trade opened", JSON.stringify({ symbol, direction: analysis.decision, entry_price: entry, trade_id: saved?.[0]?.id }));
+  return { mode: "demo", opened: true, direction: analysis.decision, entry_price: entry, trade_id: saved?.[0]?.id || null };
+}
+async function getDemoHistory(period, symbol) {
+  const now = new Date();
+  const days = period === "monthly" ? 370 : period === "weekly" ? 100 : 31;
+  const from = new Date(now.getTime() - days * 86400000).toISOString();
+  const [closed, opened, analyses] = await Promise.all([
+    db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) + "&status=eq.CLOSED&opened_at=gte." + encodeURIComponent(from) +
+      "&select=direction,entry_price,exit_price,pnl_points,opened_at,closed_at&order=closed_at.desc&limit=2000"),
+    db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) + "&status=eq.OPEN&select=id,direction,entry_price,opened_at&order=opened_at.desc&limit=100"),
+    db("market_analysis_runs?symbol=eq." + encodeURIComponent(symbol) + "&created_at=gte." + encodeURIComponent(from) +
+      "&select=decision,created_at&order=created_at.desc&limit=2000")
+  ]);
+  const buckets = new Map();
+  const ensure = key => {
+    if (!buckets.has(key)) buckets.set(key, { period: key, decisions: 0, trades: 0, wins: 0, losses: 0, breakeven: 0, pnl_points: 0 });
+    return buckets.get(key);
+  };
+  for (const a of analyses) ensure(periodKey(new Date(a.created_at), period)).decisions++;
+  for (const t of closed) {
+    const b = ensure(periodKey(new Date(t.closed_at || t.opened_at), period));
+    const pnl = Number(t.pnl_points || 0);
+    b.trades++; b.pnl_points += pnl;
+    if (pnl > 0) b.wins++; else if (pnl < 0) b.losses++; else b.breakeven++;
+  }
+  const rows = [...buckets.values()].sort((a,b) => a.period.localeCompare(b.period)).map(b => ({
+    ...b, pnl_points: Number(b.pnl_points.toFixed(4)),
+    win_rate: b.trades ? Number((b.wins / b.trades).toFixed(4)) : null
+  }));
+  const totalTrades = closed.length;
+  const totalPnl = closed.reduce((sum,t) => sum + Number(t.pnl_points || 0), 0);
+  return {
+    mode: "DEMO", symbol, period, timezone: "Africa/Kinshasa",
+    summary: {
+      decisions: analyses.length, closed_trades: totalTrades, open_trades: opened.length,
+      wins: closed.filter(t => Number(t.pnl_points) > 0).length,
+      losses: closed.filter(t => Number(t.pnl_points) < 0).length,
+      win_rate: totalTrades ? Number((closed.filter(t => Number(t.pnl_points) > 0).length / totalTrades).toFixed(4)) : null,
+      pnl_points: Number(totalPnl.toFixed(4))
+    },
+    open_positions: opened,
+    history: rows
+  };
+}
+
 async function runAutonomousCycle() {
   if (autonomousCycleRunning) return;
   autonomousCycleRunning = true;
@@ -224,6 +328,7 @@ async function runAutonomousCycle() {
       await loadAdaptiveState(symbol);
       const learning = await evaluatePendingAnalyses(symbol);
       const analysis = await getAnalysis(symbol);
+      const demo = await manageDemoTrade(symbol, analysis);
       await db("aiva_learning_state?on_conflict=symbol", {
         method: "POST",
         headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
@@ -243,6 +348,7 @@ async function runAutonomousCycle() {
         decision: analysis.decision,
         simulations: analysis.simulations,
         learning,
+        demo,
         generatedAt: analysis.generated_at
       }));
     }
@@ -291,6 +397,19 @@ const server = http.createServer(async (req, res) => {
         last_cycle_at: null,
         last_decision: null
       });
+    }
+    if (url.pathname === "/api/demo-history") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      const period = (url.searchParams.get("period") || "daily").toLowerCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      if (!["daily", "weekly", "monthly"].includes(period)) return send(res, 400, { error: "invalid_period" });
+      return send(res, 200, await getDemoHistory(period, symbol));
+    }
+    if (url.pathname === "/api/demo-status") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const rows = await db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) + "&status=eq.OPEN&select=id,direction,entry_price,opened_at,quantity&order=opened_at.desc");
+      return send(res, 200, { mode: "DEMO", enabled: String(process.env.DEMO_TRADING_ENABLED || "true").toLowerCase() === "true", open_positions: rows });
     }
     if (url.pathname === "/api/quote") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
