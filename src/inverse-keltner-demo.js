@@ -126,7 +126,8 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
   const openRows=await db("aiva_inverse_demo_trades?strategy_key=eq."+STRATEGY_KEY+"&symbol=eq."+encodeURIComponent(symbol)+"&status=eq.OPEN&select=*&order=entry_at.desc&limit=1");
   let open=openRows[0]||null,closedCount=0;
   if(open){
-    const entryMs=Date.parse(open.entry_at),after=closed.filter(c=>Date.parse(c.candle_at)>Math.floor(entryMs/300000)*300000);
+    const entryMs=Date.parse(open.entry_at),lastExitCandle=Date.parse(open.context?.last_exit_candle_at||0);
+    const after=closed.filter(c=>Date.parse(c.candle_at)>Math.max(Math.floor(entryMs/300000)*300000,lastExitCandle));
     for(const bar of after){
       const buy=open.direction==="BUY",stop=buy?bar.bid_low<=Number(open.stop_price):bar.ask_high>=Number(open.stop_price);
       const target=buy?bar.bid_high>=Number(open.target_price):bar.ask_low<=Number(open.target_price);
@@ -142,12 +143,12 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
         await db("aiva_inverse_demo_trades?id=eq."+open.id,{method:"PATCH",headers:{Prefer:"return=minimal"},
           body:JSON.stringify({status:"CLOSED",exit_at:new Date(Date.parse(bar.candle_at)+300000).toISOString(),
             exit_price:Number(exit.toFixed(4)),pnl_points:Number(pnl.toFixed(4)),close_reason:reason,
-            closed_at:new Date().toISOString(),context:{...open.context,bars_held:held}})});
+            closed_at:new Date().toISOString(),context:{...open.context,bars_held:held,last_exit_candle_at:bar.candle_at}})});
         closedCount++;open=null;break;
       }else{
         await db("aiva_inverse_demo_trades?id=eq."+open.id,{method:"PATCH",headers:{Prefer:"return=minimal"},
           body:JSON.stringify({context:{...open.context,bars_held:held}})});
-        open={...open,context:{...open.context,bars_held:held}};
+        open={...open,context:{...open.context,bars_held:held,last_exit_candle_at:bar.candle_at}};
       }
     }
     if(open){
@@ -200,4 +201,14 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
   return {status:open?"DEMO_POSITION_OPEN":"DEMO_RUNNING",fresh_tick_at:lastTickAt,closed_candles:closed.length,
     processed_signals:processed,opened_trade:opened?{id:opened.id,direction:opened.direction,entry_price:opened.entry_price}:null,
     closed_trades:closedCount,open_trade:open?{id:open.id,direction:open.direction,entry_price:open.entry_price}:null};
+}
+
+export async function getInverseKeltnerDemoStatus(db,symbol="XAUUSD"){
+  const state=await db("aiva_inverse_demo_state?strategy_key=eq."+STRATEGY_KEY+"&symbol=eq."+encodeURIComponent(symbol)+"&select=*&limit=1");
+  const rows=await db("aiva_inverse_demo_trades?strategy_key=eq."+STRATEGY_KEY+"&symbol=eq."+encodeURIComponent(symbol)+"&status=eq.CLOSED&select=direction,pnl_points,close_reason,entry_at,exit_at&order=exit_at.desc&limit=1000");
+  const all=rows.map(x=>({...x,pnl_points:Number(x.pnl_points||0)}));
+  const open=await db("aiva_inverse_demo_trades?strategy_key=eq."+STRATEGY_KEY+"&symbol=eq."+encodeURIComponent(symbol)+"&status=eq.OPEN&select=*&order=entry_at.desc&limit=1");
+  return {strategy:STRATEGY_KEY,symbol,mode:"PAPER_DEMO_ONLY",state:state[0]||null,
+    closed_trades:stats(all),by_direction:directionStats(all),open_trade:open[0]||null,
+    recent_trades:all.slice(0,30)};
 }
