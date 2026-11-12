@@ -1363,6 +1363,73 @@ const server = http.createServer(async (req, res) => {
         results
       });
     }
+    if (url.pathname === "/api/scalping-robustness") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
+      const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+      const rateKey = "scalping-robustness:" + clientIp;
+      const previousRequest = analysisRateLimit.get(rateKey) || 0;
+      const elapsed = Date.now() - previousRequest;
+      if (elapsed < 900000) return send(res, 429, { error: "robustness_rate_limited", retry_after_ms: 900000 - elapsed });
+      analysisRateLimit.set(rateKey, Date.now());
+
+      const commonRange = await getScalpingCommonRange(symbol);
+      if (!commonRange) return send(res, 422, { error: "insufficient_overlapping_history" });
+      const startMs = new Date(commonRange.start).getTime();
+      const endMs = new Date(commonRange.end).getTime();
+      const span = endMs - startMs;
+      const windows = [
+        { name: "window_1_oldest", start: new Date(startMs).toISOString(), end: new Date(startMs + Math.floor(span / 3)).toISOString() },
+        { name: "window_2_middle", start: new Date(startMs + Math.floor(span / 3)).toISOString(), end: new Date(startMs + Math.floor(2 * span / 3)).toISOString() },
+        { name: "window_3_latest", start: new Date(startMs + Math.floor(2 * span / 3)).toISOString(), end: commonRange.end }
+      ];
+      const configurations = [
+        { stopLoss: 3, takeProfit: 6 },
+        { stopLoss: 5, takeProfit: 8 },
+        { stopLoss: 7, takeProfit: 10 }
+      ];
+      const results = [];
+      for (const window of windows) {
+        for (const config of configurations) {
+          const result = await runM1ScalpingBacktest(
+            db, symbol, 0.65, 80000, "M5",
+            { start: window.start, end: window.end },
+            config
+          );
+          if (result.available) {
+            result.experiment = { window: window.name, ...config, confidence_threshold: 0.65 };
+            result.run_id = await saveScalpingBacktestResult(symbol, result);
+          }
+          results.push({
+            window: window.name,
+            period_start: window.start,
+            period_end: window.end,
+            stop_loss: config.stopLoss,
+            take_profit: config.takeProfit,
+            available: Boolean(result.available),
+            data_points: result.data_points,
+            overall: result.overall || null,
+            in_sample: result.in_sample || null,
+            out_of_sample: result.out_of_sample || null,
+            warnings: result.warnings || [result.warning],
+            run_id: result.run_id || null
+          });
+        }
+      }
+      return send(res, 200, {
+        symbol,
+        timeframe: "M5",
+        confidence_threshold: 0.65,
+        method: "three chronological windows; fixed 70/30 split inside each window",
+        windows,
+        configurations,
+        results,
+        interpretation: "Exploratory parameter sensitivity only. These windows are not independent if market regimes overlap conceptually; no parameter is promoted automatically."
+      });
+    }
     if (url.pathname === "/api/backtest-history") {
       const authHeader = String(req.headers.authorization || "");
       const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
