@@ -653,7 +653,7 @@ function runHistoricalBacktest(ticks) {
   const first = ticks[0]?.received_at || null;
   const last = ticks[ticks.length - 1]?.received_at || null;
   return {
-    method: "walk_forward_block_bootstrap_monte_carlo",
+    method: "chronological_70_30_holdout_block_bootstrap_monte_carlo",
     model: "block_bootstrap_monte_carlo_v2",
     symbol: "XAUUSD",
     data_points: ticks.length,
@@ -710,7 +710,8 @@ async function runScheduledBacktest(symbol) {
       in_sample: result.in_sample,
       out_of_sample: result.out_of_sample,
       assumptions: result.assumptions,
-      warnings
+      warnings,
+      trade_details: result.trades
     };
     const saved = await db("aiva_backtest_runs", {
       method: "POST",
@@ -791,7 +792,7 @@ const server = http.createServer(async (req, res) => {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
       const rows = await db("aiva_backtest_runs?symbol=eq." + encodeURIComponent(symbol) +
-        "&select=id,symbol,method,data_points,first_tick_at,last_tick_at,train_boundary_at,overall,in_sample,out_of_sample,assumptions,warnings,created_at&order=created_at.desc&limit=20");
+        "&select=id,symbol,method,data_points,first_tick_at,last_tick_at,train_boundary_at,overall,in_sample,out_of_sample,assumptions,warnings,trade_details,created_at&order=created_at.desc&limit=20");
       return send(res, 200, { symbol, runs: rows });
     }
     if (url.pathname === "/api/backtest") {
