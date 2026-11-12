@@ -247,8 +247,7 @@ async function getDemoRiskState(symbol) {
   const [todayRows, recentRows] = await Promise.all([
     db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) +
       "&status=eq.CLOSED&closed_at=gte." + encodeURIComponent(since) +
-      "&select=pnl_points&limit=500"),
-    db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) +
+      "&select=pnl_points&limit=500"),    db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) +
       "&status=eq.CLOSED&closed_at=gte." + encodeURIComponent(since) +
       "&select=pnl_points,closed_at&order=closed_at.desc&limit=" + maxConsecutiveLosses)
   ]);
@@ -438,10 +437,12 @@ async function runAutonomousCycle() {
       const learning = await evaluatePendingAnalyses(symbol);
       // Position protection must keep running even if a fresh analysis cannot be generated.
       let analysis = null;
+      let analysisFailure = null;
       try {
         analysis = await getAnalysis(symbol);
       } catch (analysisError) {
-        console.warn("Analysis skipped; continuing demo risk management", analysisError.message);
+        analysisFailure = analysisError instanceof Error ? analysisError.message : String(analysisError);
+        console.warn("Analysis skipped; continuing demo risk management", analysisFailure);
       }
       const demo = await manageDemoTrade(symbol, analysis);
       await db("aiva_learning_state?on_conflict=symbol", {
@@ -454,17 +455,18 @@ async function runAutonomousCycle() {
           directional_accuracy: learning.accuracy,
           updated_at: new Date().toISOString(),
           last_cycle_at: new Date().toISOString(),
-          last_decision: analysis.decision,
-          last_error: null
+          last_decision: analysis?.decision || "ANALYSIS_ERROR",
+          last_error: analysisFailure
         })
       });
       console.log("Autonomous cycle", JSON.stringify({
         symbol,
-        decision: analysis.decision,
-        simulations: analysis.simulations,
+        decision: analysis?.decision || "ANALYSIS_ERROR",
+        simulations: analysis?.simulations || 0,
         learning,
         demo,
-        generatedAt: analysis.generated_at
+        analysisError: analysisFailure,
+        generatedAt: analysis?.generated_at || null
       }));
     }
   } catch (error) {
@@ -497,8 +499,7 @@ function summarizeBacktestTrades(trades) {
     if (trade.pnl_points > 0) {
       grossProfit += trade.pnl_points;
       currentLossStreak = 0;
-    } else if (trade.pnl_points < 0) {
-      grossLoss += Math.abs(trade.pnl_points);
+    } else if (trade.pnl_points < 0) {      grossLoss += Math.abs(trade.pnl_points);
       currentLossStreak++;
       maxLossStreak = Math.max(maxLossStreak, currentLossStreak);
     } else {
@@ -747,8 +748,7 @@ const server = http.createServer(async (req, res) => {
         lastQuoteAt,
         lastError
       });
-    }
-    if (url.pathname === "/api/autonomous-status") {
+    }    if (url.pathname === "/api/autonomous-status") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
       const rows = await db("aiva_learning_state?symbol=eq." + encodeURIComponent(symbol) +
@@ -925,4 +925,3 @@ const backtestIntervalMs = Math.max(3600000, Number(process.env.BACKTEST_INTERVA
 setTimeout(() => { for (const symbol of symbols) runScheduledBacktest(symbol); }, 90000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledBacktest(symbol); }, backtestIntervalMs);
 console.log("Scheduled historical backtest enabled", backtestIntervalMs, "ms");
-
