@@ -274,6 +274,7 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
       exit_reason: exitReason,
       same_bar_ambiguity: hitBothSameBar,
       volatility_spread_ratio: Number((expectedRange / spread).toFixed(4)),
+      expected_range_points: Number(expectedRange.toFixed(4)),
       trend_alignment_score: Number(((direction === "BUY" ? momentum : -momentum) /
         (sigma * Math.sqrt(momentumLookback))).toFixed(4)),
       momentum_points: Number((current * momentum).toFixed(4)),
@@ -287,20 +288,27 @@ export async function runM1ScalpingBacktest(db, symbol = "XAUUSD", confidenceThr
 
   const inSample = trades.filter(t => t.sample === "in_sample");
   const outOfSample = trades.filter(t => t.sample === "out_of_sample");
+  const inSampleVolatility = inSample.map(t => t.expected_range_points).filter(Number.isFinite).sort((a, b) => a - b);
+  const volatilityQuantile = q => inSampleVolatility.length
+    ? inSampleVolatility[Math.min(inSampleVolatility.length - 1, Math.floor((inSampleVolatility.length - 1) * q))]
+    : Number.POSITIVE_INFINITY;
+  const volatilityP50 = volatilityQuantile(0.50);
+  const volatilityP75 = volatilityQuantile(0.75);
   const filterDefinitions = [
-    { name: "baseline", description: "Tous les signaux de référence", test: () => true },
-    { name: "volatility_ratio_gte_2_5", description: "Volatilité attendue >= 2,5 fois le spread", test: t => t.volatility_spread_ratio >= 2.5 },
-    { name: "volatility_ratio_gte_3", description: "Volatilité attendue >= 3 fois le spread", test: t => t.volatility_spread_ratio >= 3 },
-    { name: "trend_score_gte_0_5", description: "Tendance alignée, score >= 0,5", test: t => t.trend_alignment_score >= 0.5 },
-    { name: "trend_score_gte_1", description: "Tendance alignée, score >= 1", test: t => t.trend_alignment_score >= 1 },
-    { name: "volatility_2_5_and_trend_0_5", description: "Volatilité >= 2,5x spread et tendance >= 0,5", test: t => t.volatility_spread_ratio >= 2.5 && t.trend_alignment_score >= 0.5 },
-    { name: "volatility_3_and_trend_1", description: "Volatilité >= 3x spread et tendance >= 1", test: t => t.volatility_spread_ratio >= 3 && t.trend_alignment_score >= 1 }
+    { name: "baseline", description: "Tous les signaux de référence", test: () => true, threshold: null },
+    { name: "volatility_above_is_median", description: "Volatilité attendue au-dessus de la médiane IS", test: t => t.expected_range_points >= volatilityP50, threshold: volatilityP50 },
+    { name: "volatility_above_is_p75", description: "Volatilité attendue au-dessus du 75e percentile IS", test: t => t.expected_range_points >= volatilityP75, threshold: volatilityP75 },
+    { name: "trend_score_gte_0_5", description: "Tendance alignée, score >= 0,5", test: t => t.trend_alignment_score >= 0.5, threshold: 0.5 },
+    { name: "trend_score_gte_1", description: "Tendance alignée, score >= 1", test: t => t.trend_alignment_score >= 1, threshold: 1 },
+    { name: "volatility_median_and_trend_0_5", description: "Volatilité >= médiane IS et tendance >= 0,5", test: t => t.expected_range_points >= volatilityP50 && t.trend_alignment_score >= 0.5, threshold: { volatility_p50: volatilityP50, trend_score: 0.5 } },
+    { name: "volatility_p75_and_trend_1", description: "Volatilité >= P75 IS et tendance >= 1", test: t => t.expected_range_points >= volatilityP75 && t.trend_alignment_score >= 1, threshold: { volatility_p75: volatilityP75, trend_score: 1 } }
   ];
   const filterExperiments = filterDefinitions.map(filter => {
     const selected = trades.filter(filter.test);
     return {
       name: filter.name,
       description: filter.description,
+      threshold_from_in_sample_only: filter.threshold,
       overall: summarize(selected),
       in_sample: summarize(selected.filter(t => t.sample === "in_sample")),
       out_of_sample: summarize(selected.filter(t => t.sample === "out_of_sample")),
