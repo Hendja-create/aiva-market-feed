@@ -38,7 +38,7 @@ test("BUY net PnL includes bid exit, two slippage sides and commission", () => {
   assert.equal(result.gross_quote_pnl_points, 1);
   assert.equal(result.slippage_total_points, 0.1);
   assert.equal(result.commission_round_trip_points, 0.2);
-  assert.equal(result.net_pnl_points, 0.6);
+  assert.equal(result.net_pnl_points, 0.7);
 });
 
 test("SELL net PnL uses ask exit and deducts both slippage sides", () => {
