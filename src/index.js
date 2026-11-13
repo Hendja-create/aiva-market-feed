@@ -639,7 +639,7 @@ async function manageDemoTrade(symbol, analysis) {
   if (openRows.length) {
     const trade = openRows[0];
     if (!freshQuote) {
-      return { mode: "demo", open: true, risk_monitoring: "waiting_for_fresh_quote", quote_snapshot: quote };
+      return { mode: "demo", open: true, trade_id: trade.id, risk_monitoring: "waiting_for_fresh_quote", quote_snapshot: quote };
     }
 
     const entryPrice = Number(trade.entry_price);
@@ -696,11 +696,11 @@ async function manageDemoTrade(symbol, analysis) {
       console.log("Demo trade closed", JSON.stringify({
         symbol, direction: trade.direction, pnl_points: finalPnl, close_reason: closeReason
       }));
-      return { mode: "demo", closed: true, pnl_points: finalPnl, pnl_basis: context.execution_cost_model ? "net_after_costs" : "legacy_gross_no_explicit_costs", close_reason: closeReason, quote_snapshot: quote };
+      return { mode: "demo", closed: true, trade_id: trade.id, pnl_points: finalPnl, pnl_basis: context.execution_cost_model ? "net_after_costs" : "legacy_gross_no_explicit_costs", close_reason: closeReason, quote_snapshot: quote };
     }
 
     return {
-      mode: "demo", open: true, pnl_points: Number(pnl.toFixed(4)),
+      mode: "demo", open: true, trade_id: trade.id, pnl_points: Number(pnl.toFixed(4)),
       stop_loss_remaining: Number(Math.max(0, sl + pnl).toFixed(4)),
       take_profit_remaining: Number(Math.max(0, tp - pnl).toFixed(4)),
       waiting_ticks: Math.max(0, 30 - ticks.length),
