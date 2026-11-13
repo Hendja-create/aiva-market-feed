@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadRecentQuoteTicks } from "../src/inverse-keltner-demo.js";
+import { loadRecentQuoteTicks, isFreshTickTimestamp, isExactlyNextM5Candle } from "../src/inverse-keltner-demo.js";
 
 function makeRows(count) {
   return Array.from({length:count},(_,i)=>{
@@ -40,4 +40,18 @@ test("fails closed if the pagination cursor does not advance",async()=>{
     loadRecentQuoteTicks(db,"XAUUSD",2000,1000),
     /pagination cursor did not advance/
   );
+});
+
+test("rejects stale or future provider ticks outside the allowed clock skew",()=>{
+  const now=Date.parse("2026-11-13T07:50:00.000Z");
+  assert.equal(isFreshTickTimestamp("2026-11-13T07:49:30.000Z",now),true);
+  assert.equal(isFreshTickTimestamp("2026-11-13T07:48:00.000Z",now),false);
+  assert.equal(isFreshTickTimestamp("2026-11-13T07:52:00.000Z",now),false);
+});
+
+test("accepts only the immediately next M5 candle for a new signal",()=>{
+  const previous="2026-11-13T07:40:00.000Z";
+  assert.equal(isExactlyNextM5Candle(previous,"2026-11-13T07:45:00.000Z"),true);
+  assert.equal(isExactlyNextM5Candle(previous,"2026-11-13T07:50:00.000Z"),false);
+  assert.equal(isExactlyNextM5Candle(previous,"2026-11-13T02:00:00.000Z"),false);
 });
