@@ -6,6 +6,7 @@ import { runVolatilityReversalBacktest } from "./volatility-reversal-backtest.js
 import { runLiquiditySweepBacktest } from "./liquidity-sweep-backtest.js";
 import { runStrategyTournament } from "./strategy-tournament.js";
 import { runInverseKeltnerBacktest, runInverseKeltnerDemoCycle, getInverseKeltnerDemoStatus } from "./inverse-keltner-demo.js";
+import { buildQuoteSnapshot, getDemoExecutionCosts } from "./execution-accounting.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -628,21 +629,31 @@ async function manageDemoTrade(symbol, analysis) {
     "&status=eq.OPEN&select=id,direction,entry_price,opened_at,context&order=opened_at.asc&limit=1");
 
   const quotes = await db("market_quotes?symbol=eq." + encodeURIComponent(symbol) +
-    "&select=bid,ask,mid,received_at&limit=1");
+    "&select=bid,ask,mid,spread,provider_timestamp,received_at,source,connection_status&limit=1");
   const q = quotes[0];
-  const quoteAge = q ? Date.now() - new Date(q.received_at).getTime() : Infinity;
+  const quoteTimestamp = q?.provider_timestamp || q?.received_at;
+  const quoteAge = quoteTimestamp ? Date.now() - new Date(quoteTimestamp).getTime() : Infinity;
   const freshQuote = Boolean(q && Number.isFinite(quoteAge) && quoteAge >= -30000 && quoteAge <= 90000);
+  const quote = q ? buildQuoteSnapshot(q, quoteAge) : null;
 
   if (openRows.length) {
     const trade = openRows[0];
     if (!freshQuote) {
-      return { mode: "demo", open: true, risk_monitoring: "waiting_for_fresh_quote" };
+      return { mode: "demo", open: true, risk_monitoring: "waiting_for_fresh_quote", quote_snapshot: quote };
     }
 
     const entryPrice = Number(trade.entry_price);
-    const markPrice = Number(trade.direction === "BUY" ? q.bid : q.ask);
-    const pnl = (trade.direction === "BUY" ? 1 : -1) * (markPrice - entryPrice);
     const context = trade.context && typeof trade.context === "object" ? trade.context : {};
+    // Legacy trades have no persisted entry quote or cost model; do not invent costs for them.
+    const costs = context.execution_cost_model || { slippage_each_side: 0, commission_round_trip: 0 };
+    const slippage = Math.max(0, Number(costs.slippage_each_side || 0));
+    const commission = Math.max(0, Number(costs.commission_round_trip || 0));
+    const rawExitPrice = Number(trade.direction === "BUY" ? q.bid : q.ask);
+    const markPrice = trade.direction === "BUY" ? rawExitPrice - slippage : rawExitPrice + slippage;
+    const pnl = (trade.direction === "BUY" ? 1 : -1) * (markPrice - entryPrice) - commission;
+    const entryReferencePrice = Number(context.entry_quote?.fill_reference_price ?? entryPrice);
+    const grossQuotePnl = (trade.direction === "BUY" ? 1 : -1) * (rawExitPrice - entryReferencePrice);
+    const slippageTotal = 2 * slippage;
     const sl = Math.max(0.1, Number(context.stop_loss_points || stopLossPoints));
     const tp = Math.max(0.1, Number(context.take_profit_points || takeProfitPoints));
 
@@ -668,20 +679,33 @@ async function manageDemoTrade(symbol, analysis) {
           pnl_points: finalPnl,
           status: "CLOSED",
           closed_at: new Date().toISOString(),
-          close_reason: closeReason
+          close_reason: closeReason,
+          context: {
+            ...context,
+            exit_quote: { ...quote, fill_reference_price: rawExitPrice,
+              fill_side: trade.direction === "BUY" ? "BID" : "ASK" },
+            pnl_accounting: {
+              gross_quote_pnl_points: Number(grossQuotePnl.toFixed(4)),
+              slippage_total_points: Number(slippageTotal.toFixed(4)),
+              commission_round_trip_points: Number(commission.toFixed(4)),
+              net_pnl_points: finalPnl,
+              basis: context.execution_cost_model ? "bid_ask_plus_slippage_commission" : "legacy_no_explicit_cost_model"
+            }
+          }
         })
       });
       console.log("Demo trade closed", JSON.stringify({
         symbol, direction: trade.direction, pnl_points: finalPnl, close_reason: closeReason
       }));
-      return { mode: "demo", closed: true, pnl_points: finalPnl, close_reason: closeReason };
+      return { mode: "demo", closed: true, pnl_points: finalPnl, pnl_basis: context.execution_cost_model ? "net_after_costs" : "legacy_gross_no_explicit_costs", close_reason: closeReason, quote_snapshot: quote };
     }
 
     return {
       mode: "demo", open: true, pnl_points: Number(pnl.toFixed(4)),
       stop_loss_remaining: Number(Math.max(0, sl + pnl).toFixed(4)),
       take_profit_remaining: Number(Math.max(0, tp - pnl).toFixed(4)),
-      waiting_ticks: Math.max(0, 30 - ticks.length)
+      waiting_ticks: Math.max(0, 30 - ticks.length),
+      quote_snapshot: quote
     };
   }
 
@@ -689,17 +713,26 @@ async function manageDemoTrade(symbol, analysis) {
   if (risk.blockedByDailyLoss || risk.blockedByLosingStreak) {
     return {
       mode: "demo", opened: false, reason: risk.blockedByDailyLoss ? "daily_loss_limit" : "consecutive_losses_limit",
-      risk
+      risk, quote_snapshot: quote
     };
   }
   if (!analysis || !["BUY", "SELL"].includes(analysis.decision)) {
-    return { mode: "demo", opened: false, reason: "NO_TRADE", risk };
+    return { mode: "demo", opened: false, reason: "NO_TRADE", risk, quote_snapshot: quote };
   }
   if (!freshQuote) {
-    return { mode: "demo", opened: false, reason: "stale_quote" };
+    return { mode: "demo", opened: false, reason: "stale_quote", quote_snapshot: quote };
   }
 
-  const entry = Number(analysis.decision === "BUY" ? q.ask : q.bid);
+  const executionCosts = getDemoExecutionCosts();
+  const rawEntryPrice = Number(analysis.decision === "BUY" ? q.ask : q.bid);
+  const entry = analysis.decision === "BUY"
+    ? rawEntryPrice + executionCosts.slippage_each_side
+    : rawEntryPrice - executionCosts.slippage_each_side;
+  const entryQuote = {
+    ...quote,
+    fill_reference_price: rawEntryPrice,
+    fill_side: analysis.decision === "BUY" ? "ASK" : "BID"
+  };
   const saved = await db("aiva_demo_trades", {
     method: "POST", headers: { Prefer: "return=representation" },
     body: JSON.stringify({
@@ -713,6 +746,8 @@ async function manageDemoTrade(symbol, analysis) {
         risk_score: analysis.risk_score,
         simulations: analysis.simulations,
         model: analysis.features?.model || "unknown",
+        entry_quote: entryQuote,
+        execution_cost_model: executionCosts,
         stop_loss_points: stopLossPoints,
         take_profit_points: takeProfitPoints,
         max_daily_loss_points: maxDailyLossPoints,
@@ -728,7 +763,8 @@ async function manageDemoTrade(symbol, analysis) {
   return {
     mode: "demo", opened: true, direction: analysis.decision,
     entry_price: entry, stop_loss_points: stopLossPoints,
-    take_profit_points: takeProfitPoints, trade_id: saved?.[0]?.id || null
+    take_profit_points: takeProfitPoints, trade_id: saved?.[0]?.id || null,
+    quote_snapshot: entryQuote, pnl_basis: "bid_ask_plus_slippage_commission"
   };
 }
 async function getDemoHistory(period, symbol) {
@@ -790,6 +826,32 @@ async function runAutonomousCycle() {
         console.warn("Analysis skipped; continuing demo risk management", analysisFailure);
       }
       const demo = await manageDemoTrade(symbol, analysis);
+      // Every analysis decision, including NO_TRADE and risk/feed blocks, gets an execution outcome.
+      if (analysis?.id) {
+        const outcome = demo?.closed ? "CLOSED"
+          : demo?.opened ? "OPENED"
+          : demo?.open ? "POSITION_MONITORED"
+          : "NOT_OPENED";
+        await db("market_analysis_runs?id=eq." + encodeURIComponent(analysis.id), {
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({
+            features: {
+              ...(analysis.features || {}),
+              execution_audit: {
+                recorded_at: new Date().toISOString(),
+                decision: analysis.decision,
+                outcome,
+                reason: demo?.reason || demo?.risk_monitoring || null,
+                trade_id: demo?.trade_id || null,
+                pnl_points: demo?.pnl_points ?? null,
+                pnl_basis: demo?.pnl_basis || null,
+                quote_snapshot: demo?.quote_snapshot || null
+              }
+            }
+          })
+        });
+      }
       await db("aiva_learning_state?on_conflict=symbol", {
         method: "POST",
         headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
