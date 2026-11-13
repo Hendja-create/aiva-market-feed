@@ -28,3 +28,5 @@ test("judgment rubric penalizes missing source coverage and empty reasoning", ()
   assert.equal(score.dimensions.data_integrity.score,11);
   assert.ok(score.deductions.length >= 3);
 });
+
+// Regression coverage for deterministic report grading.
