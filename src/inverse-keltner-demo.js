@@ -97,22 +97,50 @@ function buildTickCandles(rows){
   }
   return [...map.values()].sort((a,b)=>Date.parse(a.candle_at)-Date.parse(b.candle_at));
 }
+export async function loadRecentQuoteTicks(db,symbol="XAUUSD",maxRows=25000,pageSize=1000){
+  const rows=[];
+  let beforeId=null,pages=0;
+  const safeMax=Math.max(1,Math.floor(Number(maxRows)||25000));
+  const safePage=Math.max(1,Math.min(1000,Math.floor(Number(pageSize)||1000)));
+  while(rows.length<safeMax){
+    const limit=Math.min(safePage,safeMax-rows.length);
+    let path="market_quote_ticks?symbol=eq."+encodeURIComponent(symbol)+
+      "&select=id,bid,ask,provider_timestamp,received_at&order=id.desc&limit="+limit;
+    if(beforeId!==null)path+="&id=lt."+encodeURIComponent(beforeId);
+    const batch=await db(path);
+    if(!Array.isArray(batch))throw new Error("Supabase tick history returned a non-array response");
+    if(!batch.length)break;
+    if(beforeId!==null&&BigInt(batch[0].id)>=BigInt(beforeId)){
+      throw new Error("Supabase tick pagination cursor did not advance");
+    }
+    rows.push(...batch);
+    pages++;
+    const nextCursor=String(batch.at(-1).id);
+    if(!/^\d+$/.test(nextCursor))throw new Error("Supabase tick history contains an invalid row id");
+    if(batch.length<limit)break;
+    beforeId=nextCursor;
+  }
+  rows.sort((a,b)=>Date.parse(a.provider_timestamp||a.received_at)-Date.parse(b.provider_timestamp||b.received_at));
+  return {rows,pages,reached_limit:rows.length>=safeMax};
+}
 async function upsertState(db,symbol,patch){
   await db("aiva_inverse_demo_state?on_conflict=strategy_key,symbol",{
     method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},
     body:JSON.stringify({strategy_key:STRATEGY_KEY,symbol,...patch,updated_at:new Date().toISOString()})});
 }
 export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
-  const raw=await db("market_quote_ticks?symbol=eq."+encodeURIComponent(symbol)+
-    "&select=bid,ask,provider_timestamp,received_at&order=provider_timestamp.desc&limit=25000");
-  const rows=raw.sort((a,b)=>Date.parse(a.provider_timestamp||a.received_at)-Date.parse(b.provider_timestamp||b.received_at));
+  const history=await loadRecentQuoteTicks(db,symbol,25000,1000);
+  const rows=history.rows;
   const last=rows.at(-1),lastTickAt=last?.provider_timestamp||last?.received_at;
   if(!lastTickAt||Date.now()-Date.parse(lastTickAt)>90000){
     await upsertState(db,symbol,{status:"WAITING_FOR_FRESH_FEED",last_tick_at:lastTickAt||null});
-    return {status:"WAITING_FOR_FRESH_FEED",last_tick_at:lastTickAt||null};
+    return {status:"WAITING_FOR_FRESH_FEED",last_tick_at:lastTickAt||null,
+      ticks_loaded:rows.length,tick_pages:history.pages,history_limit_reached:history.reached_limit};
   }
   const candles=buildTickCandles(rows);
-  if(candles.length<60)return {status:"BUILDING_M5_HISTORY",candles:candles.length,required:60};
+  if(candles.length<60)return {status:"BUILDING_M5_HISTORY",candles:candles.length,required:60,
+    ticks_loaded:rows.length,tick_pages:history.pages,history_limit_reached:history.reached_limit,
+    first_tick_at:rows[0]?.provider_timestamp||rows[0]?.received_at,last_tick_at:lastTickAt};
   const currentBucket=Math.floor(Date.now()/300000)*300000;
   const closed=candles.filter(c=>Date.parse(c.candle_at)<currentBucket);
   const forming=candles.find(c=>Date.parse(c.candle_at)===currentBucket);
