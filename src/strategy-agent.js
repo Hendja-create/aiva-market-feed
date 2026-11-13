@@ -4,7 +4,7 @@ const MAX_ROWS = 50000;
 const MAX_CANDLE_ROWS = 50000;
 const MAX_TICK_ROWS = 20000;
 const MAX_PROMPT_CHARS = 30000;
-const MAX_OUTPUT_TOKENS = 3500;
+const MAX_OUTPUT_TOKENS = 5000;
 
 const REPORT_SCHEMA = {
   type: "object",
@@ -13,7 +13,7 @@ const REPORT_SCHEMA = {
     executive_summary: { type: "string", maxLength: 900 },
     market_regime: { type: "string", maxLength: 500 },
     data_quality: {
-      type: "array", maxItems: 5, items: {
+      type: "array", maxItems: 3, items: {
         type: "object", additionalProperties: false,
         properties: {
           issue: { type: "string", maxLength: 140 }, severity: { type: "string", enum: ["low", "medium", "high"] },
@@ -22,7 +22,7 @@ const REPORT_SCHEMA = {
       }
     },
     mathematical_findings: {
-      type: "array", maxItems: 6, items: {
+      type: "array", maxItems: 4, items: {
         type: "object", additionalProperties: false,
         properties: {
           finding: { type: "string", maxLength: 180 }, evidence: { type: "string", maxLength: 450 },
@@ -31,7 +31,7 @@ const REPORT_SCHEMA = {
       }
     },
     strategy_reviews: {
-      type: "array", maxItems: 8, items: {
+      type: "array", maxItems: 4, items: {
         type: "object", additionalProperties: false,
         properties: {
           strategy: { type: "string", maxLength: 120 }, verdict: { type: "string", enum: ["promising_but_unproven", "negative", "inconclusive", "needs_more_data"] },
@@ -50,7 +50,7 @@ const REPORT_SCHEMA = {
         }, required: ["priority", "title", "action", "rationale", "validation_test", "risk_if_ignored"]
       }
     },
-    prohibited_conclusions: { type: "array", maxItems: 6, items: { type: "string", maxLength: 240 } },
+    prohibited_conclusions: { type: "array", maxItems: 4, items: { type: "string", maxLength: 240 } },
     overall_confidence: { type: "string", enum: ["low", "medium", "high"] }
   },
   required: ["executive_summary", "market_regime", "data_quality", "mathematical_findings", "strategy_reviews", "recommendations", "prohibited_conclusions", "overall_confidence"]
@@ -370,6 +370,14 @@ export async function runStrategyAgent(db, symbol) {
     const reason = payload.incomplete_details?.reason || "unknown";
     const error = new Error("OpenAI strategy report incomplete: " + reason);
     error.code = "strategy_agent_incomplete_output";
+    error.details = {
+      reason,
+      output_tokens: Number(payload.usage?.output_tokens) || null,
+      input_tokens: Number(payload.usage?.input_tokens) || null,
+      total_tokens: Number(payload.usage?.total_tokens) || null,
+      response_id: payload.id || null,
+      output_token_limit: MAX_OUTPUT_TOKENS
+    };
     throw error;
   }
   let analysis;
