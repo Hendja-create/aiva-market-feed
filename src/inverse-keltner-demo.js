@@ -1,5 +1,6 @@
 const STRATEGY_KEY = "inverse_keltner_1_5_atr_v1";
 const COSTS = { spreadMax: 1.5, slippageEachSide: 0.05, commissionRoundTrip: 0.20 };
+const ALLOW_NEW_INVERSE_KELTNER_ENTRIES = false;
 const mean = values => values.length ? values.reduce((a,b)=>a+b,0)/values.length : 0;
 function ema(values, period) {
   const out=Array(values.length).fill(null), k=2/(period+1); let v=null;
@@ -242,7 +243,7 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
     if(!isExactlyNextM5Candle(state.last_processed_candle_at,signal.candle_at))continue;
     // This exploratory inverse strategy has negative historical OOS evidence.
     // Keep position management active, but forbid new entries by default.
-    if(!open && false){ // Hard-disabled: negative OOS evidence; no environment override.
+    if(!open && ALLOW_NEW_INVERSE_KELTNER_ENTRIES){
       const source=signalAt(closed,closes,e20,a14,i);
       const next=closed[i+1]&&Date.parse(closed[i+1].candle_at)>Date.parse(signal.candle_at)?closed[i+1]:forming;
       if(source&&next){
