@@ -6,7 +6,7 @@ import { runVolatilityReversalBacktest } from "./volatility-reversal-backtest.js
 import { runLiquiditySweepBacktest } from "./liquidity-sweep-backtest.js";
 import { runStrategyTournament } from "./strategy-tournament.js";
 import { runInverseKeltnerBacktest, runInverseKeltnerDemoCycle, getInverseKeltnerDemoStatus } from "./inverse-keltner-demo.js";
-import { buildQuoteSnapshot, getDemoExecutionCosts } from "./execution-accounting.js";
+import { buildQuoteSnapshot, calculateDemoPnl, getDemoExecutionCosts } from "./execution-accounting.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -646,14 +646,13 @@ async function manageDemoTrade(symbol, analysis) {
     const context = trade.context && typeof trade.context === "object" ? trade.context : {};
     // Legacy trades have no persisted entry quote or cost model; do not invent costs for them.
     const costs = context.execution_cost_model || { slippage_each_side: 0, commission_round_trip: 0 };
-    const slippage = Math.max(0, Number(costs.slippage_each_side || 0));
-    const commission = Math.max(0, Number(costs.commission_round_trip || 0));
-    const rawExitPrice = Number(trade.direction === "BUY" ? q.bid : q.ask);
-    const markPrice = trade.direction === "BUY" ? rawExitPrice - slippage : rawExitPrice + slippage;
-    const pnl = (trade.direction === "BUY" ? 1 : -1) * (markPrice - entryPrice) - commission;
     const entryReferencePrice = Number(context.entry_quote?.fill_reference_price ?? entryPrice);
-    const grossQuotePnl = (trade.direction === "BUY" ? 1 : -1) * (rawExitPrice - entryReferencePrice);
-    const slippageTotal = 2 * slippage;
+    const pnlDetails = calculateDemoPnl(
+      trade.direction, entryPrice, entryReferencePrice, q, costs
+    );
+    const rawExitPrice = pnlDetails.raw_exit_price;
+    const markPrice = pnlDetails.effective_exit_price;
+    const pnl = pnlDetails.net_pnl_points;
     const sl = Math.max(0.1, Number(context.stop_loss_points || stopLossPoints));
     const tp = Math.max(0.1, Number(context.take_profit_points || takeProfitPoints));
 
@@ -685,9 +684,9 @@ async function manageDemoTrade(symbol, analysis) {
             exit_quote: { ...quote, fill_reference_price: rawExitPrice,
               fill_side: trade.direction === "BUY" ? "BID" : "ASK" },
             pnl_accounting: {
-              gross_quote_pnl_points: Number(grossQuotePnl.toFixed(4)),
-              slippage_total_points: Number(slippageTotal.toFixed(4)),
-              commission_round_trip_points: Number(commission.toFixed(4)),
+              gross_quote_pnl_points: pnlDetails.gross_quote_pnl_points,
+              slippage_total_points: pnlDetails.slippage_total_points,
+              commission_round_trip_points: pnlDetails.commission_round_trip_points,
               net_pnl_points: finalPnl,
               basis: context.execution_cost_model ? "bid_ask_plus_slippage_commission" : "legacy_no_explicit_cost_model"
             }
