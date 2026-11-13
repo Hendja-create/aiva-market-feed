@@ -162,7 +162,8 @@ export function scoreEvidence(trades, options = {}) {
     version: "aiva_evidence_scorecard_v1",
     status,
     eligible_for_human_review: status === "EVIDENCE_REVIEW_REQUIRED",
-    promotion_blocked: status !== "EVIDENCE_REVIEW_REQUIRED",
+    // Human review is not authorization. Keep promotion blocked in every scorecard state.
+    promotion_blocked: true,
     criteria: {
       minimum_oos_trades: Number(settings.minimumTrades),
       minimum_profit_factor: Number(settings.minimumProfitFactor),
