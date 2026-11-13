@@ -82,3 +82,27 @@ test("strategy agent identifies incomplete OpenAI output without saving a report
     else process.env.OPENAI_API_KEY = originalKey;
   }
 });
+
+test("strategy agent converts read-only DOM timeout errors into a typed timeout without saving", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  let saved = false;
+  globalThis.fetch = async () => {
+    throw new DOMException("The operation was aborted", "TimeoutError");
+  };
+  try {
+    await assert.rejects(
+      () => runStrategyAgent(async (path) => {
+        if (path === "aiva_strategy_agent_reports") saved = true;
+        return [];
+      }, "XAUUSD"),
+      error => error.code === "strategy_agent_timeout"
+    );
+    assert.equal(saved, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  }
+});
