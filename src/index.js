@@ -9,6 +9,7 @@ import { runInverseKeltnerBacktest, runInverseKeltnerDemoCycle, getInverseKeltne
 import { buildQuoteSnapshot, calculateDemoPnl, getDemoExecutionCosts } from "./execution-accounting.js";
 import { runResearchCycle, getResearchStatus } from "./research-mode.js";
 import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
+import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -732,6 +733,14 @@ async function manageDemoTrade(symbol, analysis) {
       mode: "demo", opened: false, reason: risk.blockedByDailyLoss ? "daily_loss_limit" : "consecutive_losses_limit",
       risk, quote_snapshot: quote
     };
+  }
+  const strategySelection = await selectEligiblePaperStrategy(db, symbol);
+  if (!strategySelection.selected) {
+    return { mode: "demo", opened: false, reason: "no_validated_strategy", strategy_selection: strategySelection, risk, quote_snapshot: quote };
+  }
+  const signalStrategy = analysis?.strategy_method || analysis?.features?.strategy_method || null;
+  if (signalStrategy !== strategySelection.strategy) {
+    return { mode: "demo", opened: false, reason: "signal_not_bound_to_selected_strategy", selected_strategy: strategySelection.strategy, signal_strategy: signalStrategy, risk, quote_snapshot: quote };
   }
   if (!analysis || !["BUY", "SELL"].includes(analysis.decision)) {
     return { mode: "demo", opened: false, reason: "NO_TRADE", risk, quote_snapshot: quote };
