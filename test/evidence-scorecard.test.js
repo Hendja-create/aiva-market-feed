@@ -27,7 +27,7 @@ test("marks a sufficiently sampled positive candidate for human review, never au
   const result = scoreEvidence(rows);
   assert.equal(result.status, "EVIDENCE_REVIEW_REQUIRED");
   assert.equal(result.eligible_for_human_review, true);
-  assert.equal(result.promotion_blocked, false);
+  assert.equal(result.promotion_blocked, true);
   assert.equal(result.metrics.trades, 120);
   assert.ok(result.metrics.profit_factor >= 1.2);
   assert.ok(result.additional_cost_stress.metrics.expectancy_points > 0);
