@@ -11,6 +11,7 @@ import { runResearchCycle, getResearchStatus } from "./research-mode.js";
 import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
 import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
 import { generateSelectedStrategySignal } from "./strategy-signal.js";
+import { getMarketFeedHealth, getM1ImportRetryDelayMs } from "./market-feed-health.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -106,6 +107,7 @@ const historicalContextCache = new Map();
 let historicalImportRunning = false;
 let historicalM1ImportRunning = false;
 let historicalM1LastRun = null;
+let historicalM1RetryAfter = 0;
 let historicalM5ImportRunning = false;
 let historicalM5LastRun = null;
 
@@ -290,11 +292,17 @@ async function importHistoricalDaily(symbol) {
 }
 
 async function runHistoricalM1Import(symbol) {
-  if (historicalM1ImportRunning) return;
+  if (historicalM1ImportRunning || Date.now() < historicalM1RetryAfter) return;
   historicalM1ImportRunning = true;
   try {
     const result = await importDukascopyM1Chunk(db, symbol);
-    historicalM1LastRun = { ...result, completed_at: new Date().toISOString() };
+    const retryDelayMs = getM1ImportRetryDelayMs(result);
+    historicalM1RetryAfter = retryDelayMs ? Date.now() + retryDelayMs : 0;
+    historicalM1LastRun = {
+      ...result,
+      retry_after: retryDelayMs ? new Date(historicalM1RetryAfter).toISOString() : null,
+      completed_at: new Date().toISOString()
+    };
     console.log("Dukascopy M1 import cycle", JSON.stringify(historicalM1LastRun));
   } catch (error) {
     historicalM1LastRun = {
@@ -1394,10 +1402,12 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname === "/" || url.pathname === "/health") {
+      const marketFeed = getMarketFeedHealth({ connected, lastQuoteAt });
       return send(res, 200, {
         service: "aiva-market-feed",
         status: "alive",
         connected,
+        marketFeed,
         symbols,
         lastQuoteAt,
         received,
@@ -1405,10 +1415,13 @@ const server = http.createServer(async (req, res) => {
       });
     }
     if (url.pathname === "/ready") {
-      return send(res, connected ? 200 : 503, {
+      const marketFeed = getMarketFeedHealth({ connected, lastQuoteAt });
+      const ready = connected && marketFeed.fresh;
+      return send(res, ready ? 200 : 503, {
         service: "aiva-market-feed",
-        status: connected ? "ready" : "waiting_for_market_feed",
+        status: ready ? "ready" : marketFeed.status,
         connected,
+        marketFeed,
         lastQuoteAt,
         lastError
       });
