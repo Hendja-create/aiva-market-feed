@@ -771,14 +771,14 @@ async function getDemoHistory(period, symbol) {
   const days = period === "monthly" ? 370 : period === "weekly" ? 100 : 31;
   const from = new Date(now.getTime() - days * 86400000).toISOString();  const [closed, opened, analyses] = await Promise.all([
     db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) + "&status=eq.CLOSED&opened_at=gte." + encodeURIComponent(from) +
-      "&select=direction,entry_price,exit_price,pnl_points,opened_at,closed_at&order=closed_at.desc&limit=2000"),
+      "&select=direction,entry_price,exit_price,pnl_points,opened_at,closed_at,context&order=closed_at.desc&limit=2000"),
     db("aiva_demo_trades?symbol=eq." + encodeURIComponent(symbol) + "&status=eq.OPEN&select=id,direction,entry_price,opened_at&order=opened_at.desc&limit=100"),
     db("market_analysis_runs?symbol=eq." + encodeURIComponent(symbol) + "&created_at=gte." + encodeURIComponent(from) +
       "&select=decision,created_at&order=created_at.desc&limit=2000")
   ]);
   const buckets = new Map();
   const ensure = key => {
-    if (!buckets.has(key)) buckets.set(key, { period: key, decisions: 0, trades: 0, wins: 0, losses: 0, breakeven: 0, pnl_points: 0 });
+    if (!buckets.has(key)) buckets.set(key, { period: key, decisions: 0, trades: 0, wins: 0, losses: 0, breakeven: 0, pnl_points: 0, cost_adjusted_trades: 0, legacy_cost_basis_trades: 0 });
     return buckets.get(key);
   };
   for (const a of analyses) ensure(periodKey(new Date(a.created_at), period)).decisions++;
@@ -786,6 +786,8 @@ async function getDemoHistory(period, symbol) {
     const b = ensure(periodKey(new Date(t.closed_at || t.opened_at), period));
     const pnl = Number(t.pnl_points || 0);
     b.trades++; b.pnl_points += pnl;
+    if (t.context?.execution_cost_model) b.cost_adjusted_trades++;
+    else b.legacy_cost_basis_trades++;
     if (pnl > 0) b.wins++; else if (pnl < 0) b.losses++; else b.breakeven++;
   }
   const rows = [...buckets.values()].sort((a,b) => a.period.localeCompare(b.period)).map(b => ({
@@ -794,14 +796,32 @@ async function getDemoHistory(period, symbol) {
   }));
   const totalTrades = closed.length;
   const totalPnl = closed.reduce((sum,t) => sum + Number(t.pnl_points || 0), 0);
+  const chronological = closed.slice().sort((a,b) => new Date(a.closed_at || a.opened_at) - new Date(b.closed_at || b.opened_at));
+  const performance = summarizeBacktestTrades(chronological.map(t => ({ pnl_points: Number(t.pnl_points || 0) })));
+  const decisionCounts = analyses.reduce((counts, row) => {
+    counts[row.decision] = (counts[row.decision] || 0) + 1;
+    return counts;
+  }, {});
+  const costAdjustedTrades = closed.filter(t => Boolean(t.context?.execution_cost_model)).length;
+  const legacyCostBasisTrades = totalTrades - costAdjustedTrades;
   return {
     mode: "DEMO", symbol, period, timezone: "Africa/Kinshasa",
     summary: {
-      decisions: analyses.length, closed_trades: totalTrades, open_trades: opened.length,
+      decisions: analyses.length, decision_counts: decisionCounts,
+      closed_trades: totalTrades, open_trades: opened.length,
       wins: closed.filter(t => Number(t.pnl_points) > 0).length,
       losses: closed.filter(t => Number(t.pnl_points) < 0).length,
       win_rate: totalTrades ? Number((closed.filter(t => Number(t.pnl_points) > 0).length / totalTrades).toFixed(4)) : null,
-      pnl_points: Number(totalPnl.toFixed(4))
+      pnl_points: Number(totalPnl.toFixed(4)),
+      profit_factor: performance.profit_factor,
+      expectancy_points: performance.expectancy_points,
+      max_drawdown_points: performance.max_drawdown_points,
+      max_consecutive_losses: performance.max_consecutive_losses,
+      cost_adjusted_trades: costAdjustedTrades,
+      legacy_cost_basis_trades: legacyCostBasisTrades,
+      pnl_basis: legacyCostBasisTrades > 0
+        ? "mixed_legacy_gross_and_new_net_after_costs"
+        : "net_after_bid_ask_slippage_commission"
     },
     open_positions: opened,
     history: rows
