@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { advanceHistoryBackfill, planHistoryBackfillChunk } from "../src/history-backfill.js";
+import { advanceHistoryBackfill, planHistoryBackfillChunk, shouldRunIncrementalAfterBackfill } from "../src/history-backfill.js";
 
 test("backfill advances in seven-day chunks and stops at the existing history boundary", () => {
   const plan = planHistoryBackfillChunk({
@@ -43,4 +43,11 @@ test("invalid dates and chunk sizes fail closed", () => {
   assert.throws(() => planHistoryBackfillChunk({
     start: "2016-01-01", targetBefore: "2020-01-01", chunkDays: 0
   }), /chunkDays/);
+});
+
+test("incremental import seeds history when backfill has no existing boundary", () => {
+  assert.equal(shouldRunIncrementalAfterBackfill({ status: "backfill_waiting_for_seed_history" }), true);
+  assert.equal(shouldRunIncrementalAfterBackfill({ status: "backfill_complete" }), true);
+  assert.equal(shouldRunIncrementalAfterBackfill({ status: "backfill_chunk_imported" }), false);
+  assert.equal(shouldRunIncrementalAfterBackfill({ status: "provider_error" }), false);
 });
