@@ -84,6 +84,14 @@ export async function runInverseKeltnerBacktest(db,symbol="XAUUSD",maxRows=80000
     warnings:["Le signal choisi comme perdant a été sélectionné sur ce même historique : ce backtest inversé est exploratoire et biaisé par sélection.","Les coûts restent des hypothèses, pas les frais confirmés d'un courtier.","Aucune activation dans le moteur autonome."],
     trades:trades.slice(-500)};
 }
+export function isFreshTickTimestamp(value,nowMs=Date.now(),maxSkewMs=90000){
+  const tickMs=Date.parse(value);
+  return Number.isFinite(tickMs)&&Math.abs(nowMs-tickMs)<=maxSkewMs;
+}
+export function isExactlyNextM5Candle(previousAt,nextAt){
+  const previousMs=Date.parse(previousAt),nextMs=Date.parse(nextAt);
+  return Number.isFinite(previousMs)&&Number.isFinite(nextMs)&&nextMs-previousMs===300000;
+}
 function buildTickCandles(rows){
   const map=new Map();
   for(const r of rows){
@@ -132,7 +140,7 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
   const history=await loadRecentQuoteTicks(db,symbol,25000,1000);
   const rows=history.rows;
   const last=rows.at(-1),lastTickAt=last?.provider_timestamp||last?.received_at;
-  if(!lastTickAt||Date.now()-Date.parse(lastTickAt)>90000){
+  if(!lastTickAt||!isFreshTickTimestamp(lastTickAt)){
     await upsertState(db,symbol,{status:"WAITING_FOR_FRESH_FEED",last_tick_at:lastTickAt||null});
     return {status:"WAITING_FOR_FRESH_FEED",last_tick_at:lastTickAt||null,
       ticks_loaded:rows.length,tick_pages:history.pages,history_limit_reached:history.reached_limit};
@@ -141,7 +149,8 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
   if(candles.length<60)return {status:"BUILDING_M5_HISTORY",candles:candles.length,required:60,
     ticks_loaded:rows.length,tick_pages:history.pages,history_limit_reached:history.reached_limit,
     first_tick_at:rows[0]?.provider_timestamp||rows[0]?.received_at,last_tick_at:lastTickAt};
-  const currentBucket=Math.floor(Date.now()/300000)*300000;
+  // Align candle boundaries to the provider timestamp, not the container clock.
+  const currentBucket=Math.floor(Date.parse(lastTickAt)/300000)*300000;
   const closed=candles.filter(c=>Date.parse(c.candle_at)<currentBucket);
   const forming=candles.find(c=>Date.parse(c.candle_at)===currentBucket);
   if(closed.length<55||!forming)return {status:"WAITING_FOR_COMPLETE_CANDLES",closed:candles.length,has_forming:Boolean(forming)};
@@ -158,7 +167,9 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
   const lastProcessedMs=state.last_processed_candle_at?Date.parse(state.last_processed_candle_at):0;
   const newestClosedMs=Date.parse(closed.at(-1).candle_at);
   const openRows=await db("aiva_inverse_demo_trades?strategy_key=eq."+STRATEGY_KEY+"&symbol=eq."+encodeURIComponent(symbol)+"&status=eq.OPEN&select=*&order=entry_at.desc&limit=1");
-  if(lastProcessedMs && newestClosedMs-lastProcessedMs>600000){
+  // Never replay old signals after a restart or a delayed scheduler cycle.
+  // One newly closed M5 candle is normal; two or more means we must resync first.
+  if(lastProcessedMs && newestClosedMs-lastProcessedMs>300000){
     const staleOpen=openRows[0]||null;
     if(staleOpen){
       const buy=staleOpen.direction==="BUY",exit=(buy?Number(last.bid):Number(last.ask))+(buy?-COSTS.slippageEachSide:COSTS.slippageEachSide);
@@ -168,7 +179,10 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
           pnl_points:Number(pnl.toFixed(4)),close_reason:"feed_gap_liquidation",closed_at:new Date().toISOString()})});
     }
     await upsertState(db,symbol,{last_processed_candle_at:closed.at(-1).candle_at,last_tick_at:lastTickAt,status:"RESYNCED_AFTER_FEED_GAP"});
-    return {status:"RESYNCED_AFTER_FEED_GAP",closed_open_trade:Boolean(staleOpen),baseline_candle_at:closed.at(-1).candle_at};
+    return {status:"RESYNCED_AFTER_FEED_GAP",closed_open_trade:Boolean(staleOpen),
+      baseline_candle_at:closed.at(-1).candle_at,
+      skipped_stale_signals:true,
+      lagged_candles:Math.max(1,Math.floor((newestClosedMs-lastProcessedMs)/300000)-1)};
   }
   let open=openRows[0]||null,closedCount=0;
   if(open){
@@ -223,6 +237,9 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
   for(let i=51;i<closed.length;i++){
     const signal=closed[i];
     if(Date.parse(signal.candle_at)<=lastProcessed)continue;
+    // Only the newest closed candle may trigger a fresh entry.
+    if(Date.parse(signal.candle_at)!==newestClosedMs)continue;
+    if(!isExactlyNextM5Candle(state.last_processed_candle_at,signal.candle_at))continue;
     if(!open){
       const source=signalAt(closed,closes,e20,a14,i);
       const next=closed[i+1]&&Date.parse(closed[i+1].candle_at)>Date.parse(signal.candle_at)?closed[i+1]:forming;
