@@ -240,7 +240,9 @@ export async function runInverseKeltnerDemoCycle(db,symbol="XAUUSD"){
     // Only the newest closed candle may trigger a fresh entry.
     if(Date.parse(signal.candle_at)!==newestClosedMs)continue;
     if(!isExactlyNextM5Candle(state.last_processed_candle_at,signal.candle_at))continue;
-    if(!open){
+    // This exploratory inverse strategy has negative historical OOS evidence.
+    // Keep position management active, but forbid new entries by default.
+    if(!open && String(process.env.INVERSE_KELTNER_NEW_ENTRIES_ENABLED || "false").toLowerCase() === "true"){
       const source=signalAt(closed,closes,e20,a14,i);
       const next=closed[i+1]&&Date.parse(closed[i+1].candle_at)>Date.parse(signal.candle_at)?closed[i+1]:forming;
       if(source&&next){
