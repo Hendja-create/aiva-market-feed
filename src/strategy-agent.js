@@ -321,7 +321,7 @@ export async function runStrategyAgent(db, symbol) {
           strict: true, schema: REPORT_SCHEMA
         }
       },
-      max_output_tokens: 4500
+      max_output_tokens: 9000
     })
     });
   } catch (error) {
@@ -333,7 +333,21 @@ export async function runStrategyAgent(db, symbol) {
     throw new Error("OpenAI API " + response.status + ": " + message);
   }
   const payload = await response.json();
-  const analysis = JSON.parse(extractOutputText(payload));
+  if (payload.status === "incomplete" || payload.incomplete_details) {
+    const reason = payload.incomplete_details?.reason || "unknown";
+    const error = new Error("OpenAI strategy report incomplete: " + reason);
+    error.code = "strategy_agent_incomplete_output";
+    throw error;
+  }
+  let analysis;
+  try {
+    analysis = JSON.parse(extractOutputText(payload));
+  } catch (cause) {
+    const error = new Error("OpenAI strategy report was not valid complete JSON");
+    error.code = "strategy_agent_invalid_output";
+    error.cause = cause;
+    throw error;
+  }
   const saved = await db("aiva_strategy_agent_reports", {
     method: "POST",
     headers: { Prefer: "return=representation" },
