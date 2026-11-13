@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildEvidence, metrics, summarizeCandles, summarizeResearch } from "../src/strategy-agent.js";
+import { buildEvidence, metrics, runStrategyAgent, summarizeCandles, summarizeResearch } from "../src/strategy-agent.js";
 
 test("strategy agent computes net expectancy, profit factor and drawdown", () => {
   const result = metrics([{ pnl: 3 }, { pnl: -1 }, { pnl: 2 }, { pnl: -4 }], "pnl");
