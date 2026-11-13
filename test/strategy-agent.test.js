@@ -56,3 +56,29 @@ test("strategy agent loads evidence tables concurrently and reports coverage cap
   assert.equal(evidence.quote_ticks.rows_read, 0);
   assert.match(evidence.coverage_warning, /Every row returned/);
 });
+
+test("strategy agent identifies incomplete OpenAI output without saving a report", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  let saved = false;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    status: "incomplete",
+    incomplete_details: { reason: "max_output_tokens" },
+    output: []
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  try {
+    await assert.rejects(
+      () => runStrategyAgent(async (path) => {
+        if (path === "aiva_strategy_agent_reports") saved = true;
+        return [];
+      }, "XAUUSD"),
+      error => error.code === "strategy_agent_incomplete_output"
+    );
+    assert.equal(saved, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  }
+});
