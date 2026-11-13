@@ -9,7 +9,7 @@ export function buildQuoteSnapshot(q, quoteAgeMs = null) {
     received_at: q.received_at || null,
     source: q.source || null,
     connection_status: q.connection_status || null,
-    quote_age_ms: Number.isFinite(Number(quoteAgeMs)) ? Math.round(Number(quoteAgeMs)) : null
+    quote_age_ms: quoteAgeMs !== null && quoteAgeMs !== undefined && Number.isFinite(Number(quoteAgeMs)) ? Math.round(Number(quoteAgeMs)) : null
   };
 }
 
