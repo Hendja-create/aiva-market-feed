@@ -10,6 +10,7 @@ import { buildQuoteSnapshot, calculateDemoPnl, getDemoExecutionCosts } from "./e
 import { runResearchCycle, getResearchStatus } from "./research-mode.js";
 import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
 import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
+import { generateSelectedStrategySignal } from "./strategy-signal.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -738,39 +739,39 @@ async function manageDemoTrade(symbol, analysis) {
   if (!strategySelection.selected) {
     return { mode: "demo", opened: false, reason: "no_validated_strategy", strategy_selection: strategySelection, risk, quote_snapshot: quote };
   }
-  const signalStrategy = analysis?.strategy_method || analysis?.features?.strategy_method || null;
-  if (signalStrategy !== strategySelection.strategy) {
-    return { mode: "demo", opened: false, reason: "signal_not_bound_to_selected_strategy", selected_strategy: strategySelection.strategy, signal_strategy: signalStrategy, risk, quote_snapshot: quote };
-  }
-  if (!analysis || !["BUY", "SELL"].includes(analysis.decision)) {
-    return { mode: "demo", opened: false, reason: "NO_TRADE", risk, quote_snapshot: quote };
+  const strategySignal = await generateSelectedStrategySignal(db, symbol, strategySelection.strategy);
+  if (!strategySignal.available || !["BUY", "SELL"].includes(strategySignal.direction)) {
+    return { mode: "demo", opened: false, reason: strategySignal.reason || "NO_TRADE", selected_strategy: strategySelection.strategy, strategy_signal: strategySignal, risk, quote_snapshot: quote };
   }
   if (!freshQuote) {
     return { mode: "demo", opened: false, reason: "stale_quote", quote_snapshot: quote };
   }
 
   const executionCosts = getDemoExecutionCosts();
-  const rawEntryPrice = Number(analysis.decision === "BUY" ? q.ask : q.bid);
-  const entry = analysis.decision === "BUY"
+  const signalDirection = strategySignal.direction;
+  const rawEntryPrice = Number(signalDirection === "BUY" ? q.ask : q.bid);
+  const entry = signalDirection === "BUY"
     ? rawEntryPrice + executionCosts.slippage_each_side
     : rawEntryPrice - executionCosts.slippage_each_side;
   const entryQuote = {
     ...quote,
     fill_reference_price: rawEntryPrice,
-    fill_side: analysis.decision === "BUY" ? "ASK" : "BID"
+    fill_side: signalDirection === "BUY" ? "ASK" : "BID"
   };
   const saved = await db("aiva_demo_trades", {
     method: "POST", headers: { Prefer: "return=representation" },
     body: JSON.stringify({
       symbol,
-      direction: analysis.decision,
+      direction: signalDirection,
       entry_price: entry,
       quantity: 1,
       analysis_id: analysis.id || null,
       context: {
-        confidence: analysis.confidence,
-        risk_score: analysis.risk_score,
-        simulations: analysis.simulations,
+        confidence: analysis?.confidence ?? null,
+        risk_score: analysis?.risk_score ?? null,
+        simulations: analysis?.simulations ?? null,
+        strategy_method: strategySignal.method,
+        strategy_signal: strategySignal,
         model: analysis.features?.model || "unknown",
         entry_quote: entryQuote,
         execution_cost_model: executionCosts,
@@ -782,12 +783,12 @@ async function manageDemoTrade(symbol, analysis) {
     })
   });
   console.log("Demo trade opened", JSON.stringify({
-    symbol, direction: analysis.decision, entry_price: entry,
+    symbol, direction: signalDirection, strategy_method: strategySignal.method, entry_price: entry,
     stop_loss_points: stopLossPoints, take_profit_points: takeProfitPoints,
     trade_id: saved?.[0]?.id
   }));
   return {
-    mode: "demo", opened: true, direction: analysis.decision,
+    mode: "demo", opened: true, direction: signalDirection, strategy_method: strategySignal.method, strategy_signal: strategySignal,
     entry_price: entry, stop_loss_points: stopLossPoints,
     take_profit_points: takeProfitPoints, trade_id: saved?.[0]?.id || null,
     quote_snapshot: entryQuote, pnl_basis: "bid_ask_plus_slippage_commission"
