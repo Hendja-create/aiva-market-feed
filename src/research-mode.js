@@ -9,11 +9,19 @@ function finite(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-function queryTickPath(symbol, since) {
-  return "market_quote_ticks?symbol=eq." + encodeURIComponent(symbol) +
-    "&received_at=gte." + encodeURIComponent(since) +
-    "&select=bid,ask,mid,spread,provider_timestamp,received_at,source" +
-    "&order=received_at.asc&limit=2000";
+async function findExitQuote(db, symbol, dueAt) {
+  const rows = await db("market_quote_ticks?symbol=eq." + encodeURIComponent(symbol) +
+    "&received_at=gte." + encodeURIComponent(new Date(dueAt).toISOString()) +
+    "&select=bid,ask,provider_timestamp,received_at,source" +
+    "&order=received_at.asc&limit=25");
+  return rows.find(quote => {
+    const bid = finite(quote.bid), ask = finite(quote.ask);
+    const receivedAt = new Date(quote.received_at).getTime();
+    const providerAt = quote.provider_timestamp ? new Date(quote.provider_timestamp).getTime() : NaN;
+    const age = receivedAt - providerAt;
+    return bid > 0 && ask >= bid && Number.isFinite(providerAt) &&
+      Number.isFinite(receivedAt) && age >= -30000 && age <= MAX_QUOTE_AGE_MS;
+  }) || null;
 }
 
 export async function collectResearchObservations(db, symbol) {
@@ -118,10 +126,7 @@ export async function runResearchCycle(db, symbol) {
     "&order=created_at.asc&limit=200");
   if (!openRows.length) return { ...collection, open_observations: 0, evaluated: 0 };
 
-  const earliestDue = Math.min(...openRows.map(row => new Date(row.created_at).getTime() + 5 * 60000));
   const now = Date.now();
-  const since = new Date(earliestDue - 1000).toISOString();
-  const ticks = await db(queryTickPath(symbol, since));
   let evaluated = 0;
 
   for (const observation of openRows) {
@@ -132,7 +137,7 @@ export async function runResearchCycle(db, symbol) {
       if (observation[outcomeKey]) continue;
       const dueAt = createdAt + minutes * 60000;
       if (now < dueAt) continue;
-      const quote = ticks.find(tick => new Date(tick.received_at).getTime() >= dueAt);
+      const quote = await findExitQuote(db, symbol, dueAt);
       if (quote) {
         const result = evaluateHorizon(observation, quote, minutes);
         if (result) {
@@ -143,7 +148,7 @@ export async function runResearchCycle(db, symbol) {
         patch[outcomeKey] = {
           horizon_minutes: minutes,
           outcome: "INVALID",
-          reason: "No quote available within the 10-minute evaluation window"
+          reason: "No fresh provider quote available within the 10-minute evaluation window"
         };
         patch["evaluated_" + minutes + "m_at"] = new Date().toISOString();
       }
