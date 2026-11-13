@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { metrics, summarizeCandles, summarizeResearch } from "../src/strategy-agent.js";
+import { buildEvidence, metrics, summarizeCandles, summarizeResearch } from "../src/strategy-agent.js";
 
 test("strategy agent computes net expectancy, profit factor and drawdown", () => {
   const result = metrics([{ pnl: 3 }, { pnl: -1 }, { pnl: 2 }, { pnl: -4 }], "pnl");
@@ -34,4 +34,25 @@ test("research summary separates invalid observations and horizons", () => {
   assert.equal(result["5m"].invalid, 1);
   assert.equal(result["5m"].net, 0.5);
   assert.equal(result["5m"].win_rate, 0.5);
+});
+
+test("strategy agent loads evidence tables concurrently and reports coverage caps", async () => {
+  const started = [];
+  let active = 0;
+  let peak = 0;
+  const db = async (path) => {
+    const table = path.split("?")[0];
+    started.push(table);
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    active--;
+    return [];
+  };
+  const evidence = await buildEvidence(db, "XAUUSD");
+  assert.equal(started.length, 13);
+  assert.ok(peak > 1, "database reads should run concurrently");
+  assert.equal(evidence.completeness.ticks.rows_read, 0);
+  assert.equal(evidence.quote_ticks.rows_read, 0);
+  assert.match(evidence.coverage_warning, /Every row returned/);
 });
