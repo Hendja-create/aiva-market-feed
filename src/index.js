@@ -8,6 +8,7 @@ import { runStrategyTournament } from "./strategy-tournament.js";
 import { runInverseKeltnerBacktest, runInverseKeltnerDemoCycle, getInverseKeltnerDemoStatus } from "./inverse-keltner-demo.js";
 import { buildQuoteSnapshot, calculateDemoPnl, getDemoExecutionCosts } from "./execution-accounting.js";
 import { runResearchCycle, getResearchStatus } from "./research-mode.js";
+import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -61,7 +62,7 @@ function send(res, status, body) {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": res.getHeader("access-control-allow-origin") || process.env.DASHBOARD_ORIGIN || "*",
-    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
     "access-control-allow-headers": "Content-Type, Authorization",
     "vary": "Origin"
   });
@@ -77,6 +78,22 @@ async function verifyUserToken(token) {
   if (!response.ok) return false;
   const user = await response.json();
   return Boolean(user && user.id);
+}
+
+async function verifyStrategyAgentAdmin(token) {
+  if (!token) return null;
+  const response = await fetch(baseUrl + "/auth/v1/user", {
+    headers: { apikey: publishableKey, Authorization: "Bearer " + token },
+    signal: AbortSignal.timeout(8000)
+  });
+  if (!response.ok) return null;
+  const user = await response.json();
+  const appMetadata = user?.app_metadata || {};
+  const roleIsAdmin = appMetadata.role === "admin" ||
+    (Array.isArray(appMetadata.roles) && appMetadata.roles.includes("admin"));
+  const configuredEmail = String(process.env.AIVA_STRATEGY_AGENT_ADMIN_EMAIL || "").trim().toLowerCase();
+  const emailIsAdmin = configuredEmail && String(user?.email || "").trim().toLowerCase() === configuredEmail;
+  return user?.id && (roleIsAdmin || emailIsAdmin) ? user : null;
 }
 
 
@@ -1748,6 +1765,35 @@ const server = http.createServer(async (req, res) => {
       });
       result.run_id = saved?.[0]?.id || null;
       return send(res, 200, result);
+    }
+    if (url.pathname === "/api/strategy-agent-run" && req.method === "POST") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      const admin = await verifyStrategyAgentAdmin(bearer);
+      if (!admin) return send(res, 403, { error: "admin_access_required" });
+      const rateKey = "strategy-agent:" + admin.id;
+      const previousRequest = analysisRateLimit.get(rateKey) || 0;
+      const elapsed = Date.now() - previousRequest;
+      if (elapsed < 900000) return send(res, 429, { error: "strategy_agent_rate_limited", retry_after_ms: 900000 - elapsed });
+      analysisRateLimit.set(rateKey, Date.now());
+      try {
+        const result = await runStrategyAgent(db, symbol);
+        return send(res, 200, result);
+      } catch (error) {
+        if (error?.code === "openai_key_missing") return send(res, 503, { error: "openai_api_key_not_configured" });
+        throw error;
+      }
+    }
+    if (url.pathname === "/api/strategy-agent-reports" && req.method === "GET") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (!(await verifyStrategyAgentAdmin(bearer))) return send(res, 403, { error: "admin_access_required" });
+      const limit = Number(url.searchParams.get("limit") || 10);
+      return send(res, 200, { symbol, reports: await getStrategyAgentReports(db, symbol, limit) });
     }
     if (url.pathname === "/api/research-status") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
