@@ -33,3 +33,8 @@ export function advanceHistoryBackfill(state, nextStart) {
     mode: nextMs >= targetMs ? "complete" : "backfill"
   };
 }
+
+export function shouldRunIncrementalAfterBackfill(result) {
+  return result?.status === "backfill_complete" ||
+    result?.status === "backfill_waiting_for_seed_history";
+}
