@@ -1,3 +1,4 @@
+import { scoreReportJudgment } from "./judgment-score.js";
 const MODEL = process.env.OPENAI_STRATEGY_AGENT_MODEL || "gpt-6-astra";
 const PAGE_SIZE = 1000;
 const MAX_ROWS = 50000;
@@ -400,6 +401,8 @@ export async function runStrategyAgent(db, symbol) {
     reasoning_effort: "low"
   };
   analysis._usage = usageSummary;
+  // Grade the report deterministically on the server; never ask the model to grade itself.
+  analysis.judgment_score = scoreReportJudgment(analysis, evidence.completeness);
   const saved = await db("aiva_strategy_agent_reports", {
     method: "POST",
     headers: { Prefer: "return=representation" },
