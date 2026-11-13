@@ -179,6 +179,9 @@ async function buildEvidence(db, symbol) {
     ["research", "aiva_research_observations", "id,direction,source_decision,blocking_reasons,created_at,outcome_5m,outcome_15m,outcome_30m,outcome_60m,status", "created_at.asc"],
     ["paper_trades", "paper_trades", "id,direction,pnl,status,opened_at,closed_at,strategy_version,context", "opened_at.asc"],
     ["signals", "signals", "id,direction,confidence,risk_score,strategy_version,features,created_at", "created_at.asc"],
+    ["learning_state", "aiva_learning_state", "symbol,confidence_threshold,evaluated_directional,directional_accuracy,updated_at,last_cycle_at,last_decision,last_error", "updated_at.desc"],
+    ["inverse_state", "aiva_inverse_demo_state", "strategy_key,symbol,last_processed_candle_at,last_tick_at,status,updated_at", "updated_at.desc"],
+    ["latest_quotes", "market_quotes", "symbol,bid,ask,mid,spread,provider_timestamp,received_at,source,connection_status,latency_ms,updated_at", "updated_at.desc"],
     ["candles", "aiva_historical_m1", "timeframe,candle_at,bid_open,bid_high,bid_low,bid_close,ask_open,ask_high,ask_low,ask_close,spread_close", "candle_at.asc,timeframe.asc"],
     ["daily", "aiva_historical_daily", "session_date,close,source", "session_date.asc"],
     ["ticks", "market_quote_ticks", "id,bid,ask,mid,spread,provider_timestamp,received_at,source", "id.asc"]
@@ -219,6 +222,9 @@ async function buildEvidence(db, symbol) {
       total: loaded.signals.rows.length,
       by_direction: loaded.signals.rows.reduce((a, r) => { a[r.direction] = (a[r.direction] || 0) + 1; return a; }, {})
     },
+    learning_state: loaded.learning_state.rows,
+    inverse_demo_state: loaded.inverse_state.rows,
+    latest_quotes: loaded.latest_quotes.rows,
     historical_candles: {
       M1: summarizeCandles(m1), M5: summarizeCandles(m5),
       daily_rows: loaded.daily.rows.length,
