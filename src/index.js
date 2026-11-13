@@ -1785,6 +1785,7 @@ const server = http.createServer(async (req, res) => {
         if (error?.code === "openai_key_missing") return send(res, 503, { error: "openai_api_key_not_configured" });
         if (error?.code === "strategy_agent_data_timeout") return send(res, 504, { error: "strategy_agent_data_timeout", message: "La lecture des données a dépassé le délai. Réessayez dans quelques instants." });
         if (error?.code === "strategy_agent_timeout") return send(res, 504, { error: "strategy_agent_timeout", message: "OpenAI met trop de temps à répondre. Le rapport n’a pas été enregistré ; réessayez plus tard." });
+        if (error?.code === "strategy_agent_prompt_too_large") return send(res, 413, { error: "strategy_agent_prompt_too_large", message: "Le résumé des données dépasse le budget de contexte. Aucun appel OpenAI n’a été effectué." });
         if (error?.code === "strategy_agent_incomplete_output" || error?.code === "strategy_agent_invalid_output") return send(res, 502, { error: "strategy_agent_incomplete_output", message: "OpenAI a renvoyé un rapport incomplet. Aucun rapport n’a été enregistré ; relancez l’analyse." });
         if (String(error?.message || "").startsWith("OpenAI API ")) return send(res, 502, { error: "strategy_agent_provider_error", message: "Le service OpenAI a refusé ou échoué à traiter la demande." });
         throw error;
