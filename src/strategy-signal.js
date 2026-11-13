@@ -57,11 +57,14 @@ export async function generateSelectedStrategySignal(db,symbol,method,nowMs=Date
   if(!cfg)return {available:false,direction:null,reason:"unsupported_strategy_configuration",method};
   const rows=await db("aiva_historical_m1?symbol=eq."+encodeURIComponent(symbol)+"&timeframe=eq.M5&select=candle_at,bid_open,bid_high,bid_low,bid_close&order=candle_at.desc&limit=100");
   const candles=rows.slice().reverse().map(row=>Object.fromEntries(["bid_open","bid_high","bid_low","bid_close"].map(k=>[k,Number(row[k])]).concat([["candle_at",row.candle_at]])));
-  if(candles.length<60)return {available:false,direction:null,reason:"insufficient_closed_m5_history",method,rows:candles.length};
   if(candles.some(c=>![c.bid_open,c.bid_high,c.bid_low,c.bid_close].every(Number.isFinite)||c.bid_low>c.bid_high||c.bid_open<=0))return {available:false,direction:null,reason:"invalid_candle_data",method};
-  for(let i=1;i<candles.length;i++){const gap=Date.parse(candles[i].candle_at)-Date.parse(candles[i-1].candle_at);if(gap!==300000)return {available:false,direction:null,reason:"m5_history_gap",method};}
-  const candleAt=Date.parse(candles.at(-1).candle_at), age=nowMs-candleAt;
-  if(!Number.isFinite(candleAt)||age<0||age>360000)return {available:false,direction:null,reason:"stale_or_unclosed_m5_candle",method,candle_at:candles.at(-1)?.candle_at,age_ms:age};
-  const direction=evaluate(candles,cfg);
-  return {available:true,direction,decision:direction||"NO_TRADE",method,signal_candle_at:candles.at(-1).candle_at,timeframe:"M5",entry_rule:"next fresh live Bid/Ask quote after closed signal candle",reason:direction?"selected_strategy_condition_met":"selected_strategy_condition_not_met"};
+  // Weekend/session gaps are allowed only before the contiguous trailing sample.
+  let start=candles.length-1;
+  while(start>0&&Date.parse(candles[start].candle_at)-Date.parse(candles[start-1].candle_at)===300000)start--;
+  const continuous=candles.slice(start);
+  if(continuous.length<60)return {available:false,direction:null,reason:"insufficient_contiguous_m5_history",method,rows:continuous.length};
+  const candleAt=Date.parse(continuous.at(-1).candle_at), closedAt=candleAt+300000, age=nowMs-closedAt;
+  if(!Number.isFinite(candleAt)||age<0||age>360000)return {available:false,direction:null,reason:"stale_or_unclosed_m5_candle",method,candle_at:continuous.at(-1)?.candle_at,closed_at:new Date(closedAt).toISOString(),age_ms:age};
+  const direction=evaluate(continuous,cfg);
+  return {available:true,direction,decision:direction||"NO_TRADE",method,signal_candle_at:continuous.at(-1).candle_at,signal_candle_closed_at:new Date(closedAt).toISOString(),timeframe:"M5",entry_rule:"next fresh live Bid/Ask quote after closed signal candle",reason:direction?"selected_strategy_condition_met":"selected_strategy_condition_not_met"};
 }
