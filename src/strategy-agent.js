@@ -307,7 +307,7 @@ export async function runStrategyAgent(db, symbol) {
       "Authorization": "Bearer " + process.env.OPENAI_API_KEY,
       "Content-Type": "application/json"
     },
-    signal: AbortSignal.timeout(90000),
+    signal: AbortSignal.timeout(180000),
     body: JSON.stringify({
       model: MODEL,
       reasoning: { effort: "medium" },
@@ -325,7 +325,12 @@ export async function runStrategyAgent(db, symbol) {
     })
     });
   } catch (error) {
-    if (error?.name === "TimeoutError" || error?.name === "AbortError") error.code = "strategy_agent_timeout";
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      const timeoutError = new Error("OpenAI strategy agent request timed out");
+      timeoutError.code = "strategy_agent_timeout";
+      timeoutError.cause = error;
+      throw timeoutError;
+    }
     throw error;
   }
   if (!response.ok) {
