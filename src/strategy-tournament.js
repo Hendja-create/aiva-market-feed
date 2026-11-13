@@ -1,3 +1,4 @@
+import { scoreEvidence } from "./evidence-scorecard.js";
 function mean(a) { return a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0; }
 function ema(values, period) {
   const out = Array(values.length).fill(null), k = 2 / (period + 1);
@@ -48,6 +49,18 @@ function metrics(trades) {
     max_drawdown_points:Number(dd.toFixed(4)), max_consecutive_losses:maxStreak };
 }
 function utcHour(value) { return new Date(value).getUTCHours(); }
+function classifyMarketRegime(i, e20, e50, a14) {
+  const volatility = a14[i];
+  if (!Number.isFinite(volatility) || volatility <= 0 ||
+      !Number.isFinite(e20[i]) || !Number.isFinite(e50[i]) ||
+      !Number.isFinite(e20[i - 5])) return "unclassified";
+  const trendGap = (e20[i] - e50[i]) / volatility;
+  const fastSlope = (e20[i] - e20[i - 5]) / volatility;
+  if (trendGap >= 0.25 && fastSlope >= 0.10) return "bullish_trend";
+  if (trendGap <= -0.25 && fastSlope <= -0.10) return "bearish_trend";
+  return "range_or_transition";
+}
+
 function buildSignals(c, closes, e9, e20, e50, r2, r14, a14, cfg) {
   const i=cfg.i, close=closes[i], prev=closes[i-1], bar=c[i], a=a14[i];
   if (!Number.isFinite(a) || a<=0 || i<cfg.minLookback) return null;
@@ -162,13 +175,17 @@ export async function runStrategyTournament(db, symbol="XAUUSD", timeframe="M5",
       const exit=rawExit+(buy?-0.05:0.05), pnl=(buy?1:-1)*(exit-entry)-0.20;
       trades.push({direction,signal_time:candles[i].candle_at,entry_time:entryBar.candle_at,exit_time:candles[exitIndex].candle_at,
         entry_price:Number(entry.toFixed(4)),exit_price:Number(exit.toFixed(4)),pnl_points:Number(pnl.toFixed(4)),
-        exit_reason:reason,same_bar_ambiguity:ambiguous,sample:i<split?"in_sample":"out_of_sample"});
+        exit_reason:reason,same_bar_ambiguity:ambiguous,sample:i<split?"in_sample":"out_of_sample",
+        market_regime:classifyMarketRegime(i,e20,e50,a14)});
       nextAllowed=exitIndex+1;
     }
     const is=trades.filter(t=>t.sample==="in_sample"), oos=trades.filter(t=>t.sample==="out_of_sample");
     const byDirection=list=>({BUY:metrics(list.filter(t=>t.direction==="BUY")),SELL:metrics(list.filter(t=>t.direction==="SELL"))});
     results.push({name:cfg.name,method:"aiva_strategy_tournament_v1_"+cfg.family+"_"+cfg.name.toLowerCase().replace(/[^a-z0-9]+/g,"_"),
       config:cfg,overall:metrics(trades),in_sample:metrics(is),out_of_sample:metrics(oos),
+      evidence_scorecard:scoreEvidence(oos,{minimumTrades:100,minimumProfitFactor:1.2,stressCostPerTrade:0.2}),
+      out_of_sample_by_regime:Object.fromEntries([...new Set(oos.map(t=>t.market_regime))].sort()
+        .map(regime=>[regime,metrics(oos.filter(t=>t.market_regime===regime))])),
       by_direction:{overall:byDirection(trades),in_sample:byDirection(is),out_of_sample:byDirection(oos)},
       assumptions:{source:"Dukascopy native Bid/Ask M5",horizon_bars:6,horizon_minutes:30,atr_stop_multiple:1.2,
         stop_min_points:3,stop_max_points:8,target_r_multiple:1.5,spread_max_points:1.5,
