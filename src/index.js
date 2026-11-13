@@ -7,6 +7,7 @@ import { runLiquiditySweepBacktest } from "./liquidity-sweep-backtest.js";
 import { runStrategyTournament } from "./strategy-tournament.js";
 import { runInverseKeltnerBacktest, runInverseKeltnerDemoCycle, getInverseKeltnerDemoStatus } from "./inverse-keltner-demo.js";
 import { buildQuoteSnapshot, calculateDemoPnl, getDemoExecutionCosts } from "./execution-accounting.js";
+import { runResearchCycle, getResearchStatus } from "./research-mode.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -1748,6 +1749,15 @@ const server = http.createServer(async (req, res) => {
       result.run_id = saved?.[0]?.id || null;
       return send(res, 200, result);
     }
+    if (url.pathname === "/api/research-status") {
+      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
+      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
+      const authHeader = String(req.headers.authorization || "");
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
+      const result = await getResearchStatus(db, symbol);
+      return send(res, 200, result);
+    }
     if (url.pathname === "/api/inverse-keltner-demo-status") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
@@ -1892,6 +1902,26 @@ setTimeout(() => {
   console.log("Starting Live-Rates connection after deployment grace period", feedConnectDelayMs, "ms");
   socket.connect();
 }, feedConnectDelayMs).unref();
+
+let researchCycleRunning = false;
+async function runScheduledResearchCycle(symbol) {
+  if (researchCycleRunning) return;
+  researchCycleRunning = true;
+  try {
+    const result = await runResearchCycle(db, symbol);
+    if (result.observations_inserted || result.evaluated) {
+      console.log("AIVA Research Mode cycle", JSON.stringify({ symbol, ...result, real_orders_enabled: false }));
+    }
+  } catch (error) {
+    console.error("AIVA Research Mode cycle failed", error instanceof Error ? error.message : String(error));
+  } finally {
+    researchCycleRunning = false;
+  }
+}
+const researchCycleIntervalMs = Math.max(15000, Math.min(60000, Number(process.env.RESEARCH_MODE_INTERVAL_MS || 30000)));
+setTimeout(() => { for (const symbol of symbols) runScheduledResearchCycle(symbol); }, 75000).unref();
+setInterval(() => { for (const symbol of symbols) runScheduledResearchCycle(symbol); }, researchCycleIntervalMs);
+console.log("AIVA Research Mode paper-only scheduler enabled", researchCycleIntervalMs, "ms");
 
 const autonomousIntervalMs = Math.max(30000, Math.min(300000, Number(process.env.AUTO_ANALYSIS_INTERVAL_MS || 60000)));
 setTimeout(() => { runAutonomousCycle(); }, 20000);
