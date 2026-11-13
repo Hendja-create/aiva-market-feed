@@ -9,10 +9,9 @@ function finite(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-function queryTickPath(symbol, since, until) {
+function queryTickPath(symbol, since) {
   return "market_quote_ticks?symbol=eq." + encodeURIComponent(symbol) +
     "&received_at=gte." + encodeURIComponent(since) +
-    "&received_at=lte." + encodeURIComponent(until) +
     "&select=bid,ask,mid,spread,provider_timestamp,received_at,source" +
     "&order=received_at.asc&limit=2000";
 }
@@ -122,8 +121,7 @@ export async function runResearchCycle(db, symbol) {
   const earliestDue = Math.min(...openRows.map(row => new Date(row.created_at).getTime() + 5 * 60000));
   const now = Date.now();
   const since = new Date(earliestDue - 1000).toISOString();
-  const until = new Date(now).toISOString();
-  const ticks = await db(queryTickPath(symbol, since, until));
+  const ticks = await db(queryTickPath(symbol, since));
   let evaluated = 0;
 
   for (const observation of openRows) {
