@@ -39,7 +39,7 @@ test("marks a sufficiently sampled positive candidate for human review, never au
 });
 
 test("rejects positive win rate when net expectancy and profit factor are poor", () => {
-  const rows = Array.from({ length: 120 }, (_, index) => index < 78 ? 1 : -2);
+  const rows = tradesFrom(Array.from({ length: 120 }, (_, index) => index < 78 ? 1 : -2));
   const result = scoreEvidence(rows);
   assert.equal(result.status, "NOT_ELIGIBLE");
   assert.ok(result.failures.includes("oos_profit_factor_below_minimum"));
