@@ -73,7 +73,10 @@ test("strategy agent identifies incomplete OpenAI output without saving a report
         if (path === "aiva_strategy_agent_reports") saved = true;
         return [];
       }, "XAUUSD"),
-      error => error.code === "strategy_agent_incomplete_output"
+      error => error.code === "strategy_agent_incomplete_output" &&
+        error.details?.reason === "max_output_tokens" &&
+        error.details?.output_tokens === null &&
+        error.details?.output_token_limit === 5000
     );
     assert.equal(saved, false);
   } finally {
@@ -134,7 +137,7 @@ test("strategy agent records actual OpenAI token usage with the saved report", a
       return [];
     }, "XAUUSD");
     assert.equal(requestBody.reasoning.effort, "low");
-    assert.equal(requestBody.max_output_tokens, 3500);
+    assert.equal(requestBody.max_output_tokens, 5000);
     assert.equal(savedBody.report._usage.input_tokens, 1200);
     assert.equal(savedBody.report._usage.output_tokens, 450);
     assert.equal(savedBody.report._usage.cached_input_tokens, 300);
