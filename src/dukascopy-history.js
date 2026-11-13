@@ -1,5 +1,5 @@
 import { getHistoricalRates } from "dukascopy-node";
-import { planHistoryBackfillChunk, advanceHistoryBackfill } from "./history-backfill.js";
+import { planHistoryBackfillChunk, advanceHistoryBackfill, shouldRunIncrementalAfterBackfill } from "./history-backfill.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -134,9 +134,10 @@ async function runBackfillChunk(db, symbol, timeframe, configuredStart) {
 async function importDukascopyChunk(db, symbol, timeframe, startDate) {
   const backfillEnabled = process.env["DUKASCOPY_" + timeframe + "_BACKFILL_ENABLED"] === "true";
   const backfillStart = process.env["DUKASCOPY_" + timeframe + "_BACKFILL_START_DATE"] || "2016-01-01";
+  let backfillResult = null;
   if (backfillEnabled) {
-    const result = await runBackfillChunk(db, symbol, timeframe, backfillStart);
-    if (result.status !== "backfill_complete") return result;
+    backfillResult = await runBackfillChunk(db, symbol, timeframe, backfillStart);
+    if (!shouldRunIncrementalAfterBackfill(backfillResult)) return backfillResult;
   }
 
   const intervalMs = timeframe === "M5" ? 5 * 60 * 1000 : 60 * 1000;
@@ -161,7 +162,10 @@ async function importDukascopyChunk(db, symbol, timeframe, startDate) {
   return {
     status: "chunk_imported", symbol, timeframe, from, to,
     bid_candles: imported.bidCandles, ask_candles: imported.askCandles,
-    matched_candles: imported.matchedCandles, imported: imported.matchedCandles, next_start: to
+    matched_candles: imported.matchedCandles, imported: imported.matchedCandles, next_start: to,
+    ...(backfillResult?.status === "backfill_waiting_for_seed_history"
+      ? { backfill_status: backfillResult.status }
+      : {})
   };
 }
 
