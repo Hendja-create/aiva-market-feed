@@ -9,7 +9,7 @@ test("judgment rubric rewards evidence, numerical findings, uncertainty and test
     overall_confidence: "medium",
     mathematical_findings: Array.from({length:4},(_,i)=>({finding:"Constat "+i,evidence:"Sur 42 transactions, le profit factor est 0.8 et l'expectancy est négative après coûts.",confidence:"high"})),
     strategy_reviews: Array.from({length:4},(_,i)=>({strategy:"Stratégie "+i,evidence:"Résultat OOS sur 40 trades, expectancy négative.",main_risk:"Biais de sélection et coûts variables."})),
-    recommendations: Array.from({length:5},(_,i)=>({rationale:"La validation reste incertaine.",validation_test:"Tester sur 100 observations indépendantes avec coûts préenregistrés."})),
+    recommendations: Array.from({length:5},(_,i)=>({rationale:"La validation reste incertaine faute de données indépendantes.",validation_test:"Tester sur 100 observations indépendantes avec coûts préenregistrés."})),
     data_quality: [{issue:"Données limitées",impact:"Échantillon incomplet",severity:"high"}],
     prohibited_conclusions:["Ne pas conclure à une rentabilité réelle."]
   };
