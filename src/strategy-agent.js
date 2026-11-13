@@ -1,6 +1,6 @@
 const MODEL = process.env.OPENAI_STRATEGY_AGENT_MODEL || "gpt-6-astra";
 const PAGE_SIZE = 1000;
-const MAX_ROWS = 120000;
+const MAX_ROWS = 200000;
 
 const REPORT_SCHEMA = {
   type: "object",
@@ -56,7 +56,7 @@ function number(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
-function metrics(rows, pnlKey) {
+export function metrics(rows, pnlKey) {
   const valid = rows.map(row => number(row[pnlKey])).filter(value => value !== null);
   let equity = 0, peak = 0, maxDrawdown = 0, grossProfit = 0, grossLoss = 0, streak = 0, maxStreak = 0;
   for (const pnl of valid) {
@@ -109,7 +109,7 @@ function groupBacktests(rows) {
     recent_warnings: runs.slice(0, 3).flatMap(r => Array.isArray(r.warnings) ? r.warnings : [])
   })).sort((a, b) => (b.latest_at || "").localeCompare(a.latest_at || ""));
 }
-function summarizeResearch(rows) {
+export function summarizeResearch(rows) {
   const result = {};
   for (const horizon of ["5m", "15m", "30m", "60m"]) {
     const outcomes = rows.map(r => r["outcome_" + horizon])
@@ -125,7 +125,7 @@ function summarizeResearch(rows) {
   }
   return result;
 }
-function summarizeCandles(rows) {
+export function summarizeCandles(rows) {
   const ordered = rows.slice().sort((a, b) => (a.candle_at || "").localeCompare(b.candle_at || ""));
   const spreads = ordered.map(r => number(r.spread_close)).filter(v => v !== null && v >= 0);
   const returns = [];
@@ -179,13 +179,13 @@ async function buildEvidence(db, symbol) {
     ["research", "aiva_research_observations", "id,direction,source_decision,blocking_reasons,created_at,outcome_5m,outcome_15m,outcome_30m,outcome_60m,status", "created_at.asc"],
     ["paper_trades", "paper_trades", "id,direction,pnl,status,opened_at,closed_at,strategy_version,context", "opened_at.asc"],
     ["signals", "signals", "id,direction,confidence,risk_score,strategy_version,features,created_at", "created_at.asc"],
-    ["candles", "aiva_historical_m1", "timeframe,candle_at,bid_open,bid_high,bid_low,bid_close,ask_open,ask_high,ask_low,ask_close,spread_close", "candle_at.asc"],
+    ["candles", "aiva_historical_m1", "timeframe,candle_at,bid_open,bid_high,bid_low,bid_close,ask_open,ask_high,ask_low,ask_close,spread_close", "candle_at.asc,timeframe.asc"],
     ["daily", "aiva_historical_daily", "session_date,close,source", "session_date.asc"],
     ["ticks", "market_quote_ticks", "id,bid,ask,mid,spread,provider_timestamp,received_at,source", "id.asc"]
   ];
   const loaded = {};
   for (const [key, table, select, order] of specs) {
-    const cap = key === "candles" ? 120000 : key === "ticks" ? 120000 : MAX_ROWS;
+    const cap = key === "candles" ? 200000 : key === "ticks" ? 200000 : MAX_ROWS;
     loaded[key] = await readAll(db, table, select, order, symbol, cap);
   }
   const m1 = loaded.candles.rows.filter(r => r.timeframe === "M1");
