@@ -116,7 +116,7 @@ export async function loadRecentQuoteTicks(db,symbol="XAUUSD",maxRows=25000,page
     rows.push(...batch);
     pages++;
     const nextCursor=String(batch.at(-1).id);
-    if(!/^\\d+$/.test(nextCursor))throw new Error("Supabase tick history contains an invalid row id");
+    if(!/^\d+$/.test(nextCursor))throw new Error("Supabase tick history contains an invalid row id");
     if(batch.length<limit)break;
     beforeId=nextCursor;
   }
