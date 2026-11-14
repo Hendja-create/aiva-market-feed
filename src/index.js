@@ -12,6 +12,7 @@ import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
 import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
 import { generateSelectedStrategySignal } from "./strategy-signal.js";
 import { getMarketFeedHealth, getM1ImportRetryDelayMs } from "./market-feed-health.js";
+import { summarizeProbabilityCalibration } from "./probability-calibration.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -577,16 +578,18 @@ async function evaluatePendingAnalyses(symbol) {
   }
 
   const history = await db("market_analysis_runs?symbol=eq." + encodeURIComponent(symbol) +
-    "&evaluated_at=not.is.null&decision=in.(BUY,SELL)&select=decision,prediction_correct&order=evaluated_at.desc&limit=100");
-  const reviewed = history.length;
-  const accuracy = reviewed ? history.filter(row => row.prediction_correct === true).length / reviewed : null;
+    "&evaluated_at=not.is.null&select=decision,prediction_correct,probability_up,probability_down,actual_direction&order=evaluated_at.desc&limit=100");
+  const directionalHistory = history.filter(row => row.decision === "BUY" || row.decision === "SELL");
+  const reviewed = directionalHistory.length;
+  const accuracy = reviewed ? directionalHistory.filter(row => row.prediction_correct === true).length / reviewed : null;
+  const probabilityCalibration = summarizeProbabilityCalibration(history);
   if (reviewed >= 50 && accuracy !== null) {
     if (accuracy < 0.50) adaptiveConfidenceThreshold = 0.75;
     else if (accuracy < 0.57) adaptiveConfidenceThreshold = 0.72;
     else if (accuracy > 0.65) adaptiveConfidenceThreshold = 0.65;
     else adaptiveConfidenceThreshold = 0.68;
   }
-  return { evaluated, reviewedDirectional: reviewed, accuracy, confidenceThreshold: adaptiveConfidenceThreshold };
+  return { evaluated, reviewedDirectional: reviewed, accuracy, probabilityCalibration, confidenceThreshold: adaptiveConfidenceThreshold };
 }
 
 
