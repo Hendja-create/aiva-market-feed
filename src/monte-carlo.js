@@ -48,11 +48,15 @@ export function runDeterministicMonteCarlo({
   seedMaterial = "",
   sampleSizes = DEFAULT_SAMPLE_SIZES
 }) {
-  const cleanReturns = Array.isArray(returns) ? returns.filter(value => Number.isFinite(value)) : [];
+  if (!Array.isArray(sampleSizes) || !Array.isArray(returns) || !returns.length ||
+      returns.some(value => !Number.isFinite(value) || value <= -1)) {
+    return { available: false, reason: "invalid_simulation_inputs", sample_sizes: [] };
+  }
+  const cleanReturns = returns;
   const sizes = [...new Set(sampleSizes.map(Number).filter(value =>
     Number.isInteger(value) && value > 0 && value <= 20000
   ))].sort((a, b) => a - b);
-  if (!cleanReturns.length || !(Number.isFinite(current) && current > 0) ||
+  if (!(Number.isFinite(current) && current > 0) ||
       !(Number.isFinite(spread) && spread >= 0) || !(Number.isFinite(sigma) && sigma >= 0) ||
       !Number.isInteger(horizon) || horizon < 1 || !Number.isInteger(blockLength) || blockLength < 1 ||
       !sizes.length) {
