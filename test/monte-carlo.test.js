@@ -42,3 +42,14 @@ test("rejects invalid or empty simulation inputs", () => {
   assert.equal(runDeterministicMonteCarlo({ ...input, current: 0 }).available, false);
   assert.equal(runDeterministicMonteCarlo({ ...input, sampleSizes: [] }).available, false);
 });
+
+test("rejects malformed sample-size inputs without throwing", () => {
+  assert.equal(runDeterministicMonteCarlo({ ...input, sampleSizes: null }).reason, "invalid_simulation_inputs");
+  assert.equal(runDeterministicMonteCarlo({ ...input, sampleSizes: {} }).reason, "invalid_simulation_inputs");
+});
+
+test("rejects non-physical returns that could produce zero or negative prices", () => {
+  assert.equal(runDeterministicMonteCarlo({ ...input, returns: [0.01, -1] }).reason, "invalid_simulation_inputs");
+  assert.equal(runDeterministicMonteCarlo({ ...input, returns: [0.01, -1.2] }).reason, "invalid_simulation_inputs");
+  assert.equal(runDeterministicMonteCarlo({ ...input, returns: [0.01, NaN] }).reason, "invalid_simulation_inputs");
+});
