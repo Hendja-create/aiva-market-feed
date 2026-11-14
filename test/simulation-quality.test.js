@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { isValidSimulationCandle, isContinuousWindow } from "../src/simulation-quality.js";
+import "../src/strategy-tournament.js";
 
 function candle(at, overrides = {}) {
   return { candle_at: at, bid_open: 100, bid_high: 102, bid_low: 99, bid_close: 101,
