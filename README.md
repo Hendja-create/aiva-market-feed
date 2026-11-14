@@ -10,6 +10,8 @@ Persistent Node.js worker subscribing to Live-Rates through Socket.IO and storin
 - `LIVE_RATES_SOCKET_HOST`: defaults to `eu-wss.live-rates.com`.
 - `SYMBOLS`: comma-separated symbols, defaults to `XAUUSD`.
 - `PORT`: health endpoint port, defaults to 3000.
+- `AIVA_MONTE_CARLO_WORKERS`: worker-thread count for Monte Carlo calculations, defaults to 2 (allowed: 1–8).
+- `AIVA_MONTE_CARLO_MAX_QUEUE`: maximum waiting Monte Carlo analyses, defaults to 32 (allowed: 0–1000). When full, `/api/analysis` returns HTTP 503 with a retry hint.
 
 ## Supabase schema
 

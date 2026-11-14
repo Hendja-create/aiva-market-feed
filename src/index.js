@@ -12,7 +12,12 @@ import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
 import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
 import { generateSelectedStrategySignal } from "./strategy-signal.js";
 import { getMarketFeedHealth, getM1ImportRetryDelayMs } from "./market-feed-health.js";
-import { runDeterministicMonteCarlo } from "./monte-carlo.js";
+import { MonteCarloWorkerPool } from "./monte-carlo-worker-pool.js";
+
+const monteCarloPool = new MonteCarloWorkerPool({
+  size: Number(process.env.AIVA_MONTE_CARLO_WORKERS || 2),
+  maxQueue: Number(process.env.AIVA_MONTE_CARLO_MAX_QUEUE || 32)
+});
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -430,7 +435,7 @@ async function getAnalysis(symbol) {
   const sigma = Math.sqrt(variance);
   const horizon = 30;
   const blockLength = 3;
-  const monteCarlo = runDeterministicMonteCarlo({
+  const monteCarlo = await monteCarloPool.run({
     returns,
     current,
     spread,
@@ -1393,6 +1398,7 @@ const server = http.createServer(async (req, res) => {
         symbols,
         lastQuoteAt,
         received,
+        analysisQueue: monteCarloPool.getStatus(),
         lastError
       });
     }
@@ -1882,8 +1888,17 @@ const server = http.createServer(async (req, res) => {
       if (analysisRateLimit.size > 2000) {
         for (const [ip, timestamp] of analysisRateLimit) if (now - timestamp > 60000) analysisRateLimit.delete(ip);
       }
-      const result = await getAnalysis(symbol);
-      return send(res, 200, result);
+      try {
+        const result = await getAnalysis(symbol);
+        return send(res, 200, result);
+      } catch (error) {
+        if (error?.code === "AIVA_ANALYSIS_QUEUE_FULL") {
+          if (analysisRateLimit.get(clientIp) === now) analysisRateLimit.delete(clientIp);
+          return send(res, 503, { error: "analysis_queue_full", retry_after_ms: 1000,
+            message: "Le moteur d’analyse est momentanément saturé. Réessayez dans un instant." });
+        }
+        throw error;
+      }
     }
     return send(res, 404, { error: "not_found" });
   } catch (error) {
