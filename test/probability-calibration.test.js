@@ -26,7 +26,9 @@ test("ignores malformed probabilities and unknown outcomes", () => {
   const result = summarizeProbabilityCalibration([
     { decision: "BUY", probability_up: 1.2, probability_down: 0, actual_direction: "UP" },
     { decision: "BUY", probability_up: 0.7, probability_down: 0.4, actual_direction: "UP" },
-    { decision: "SELL", probability_up: 0.2, probability_down: 0.7, actual_direction: "SIDEWAYS" }
+    { decision: "SELL", probability_up: 0.2, probability_down: 0.7, actual_direction: "SIDEWAYS" },
+    { decision: "BUY", probability_up: null, probability_down: 0.2, actual_direction: "UP" },
+    null
   ]);
   assert.equal(result.observations, 0);
   assert.equal(result.multiclass_brier_score, null);
@@ -42,4 +44,16 @@ test("includes low-confidence and NO_TRADE forecasts in Brier score but not dire
   assert.equal(result.directional_observations, 1);
   assert.equal(result.bins.length, 0);
   assert.equal(result.directional_ece, null);
+});
+
+test("marks calibration measured only after the configured minimum sample", () => {
+  const rows = Array.from({ length: 30 }, () => ({
+    decision: "BUY",
+    probability_up: 0.7,
+    probability_down: 0.2,
+    actual_direction: "UP"
+  }));
+  const result = summarizeProbabilityCalibration(rows);
+  assert.equal(result.observations, 30);
+  assert.equal(result.status, "measured");
 });
