@@ -1,0 +1,28 @@
+name: Isolated Monte Carlo benchmark
+
+on:
+  push:
+    branches:
+      - benchmark/monte-carlo-pr21
+  pull_request:
+    branches:
+      - feat/deterministic-monte-carlo-sensitivity
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout benchmark branch
+        uses: actions/checkout@v4
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm install
+      - name: Run isolated Monte Carlo benchmark
+        run: node scripts/benchmark-monte-carlo.js
