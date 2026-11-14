@@ -2,13 +2,12 @@ export function getMarketFeedHealth({ connected, lastQuoteAt, connectedAt = null
   const reference = lastQuoteAt || (connected ? connectedAt : null);
   const timestamp = reference ? new Date(reference).getTime() : NaN;
   const ageMs = Number.isFinite(timestamp) ? Math.max(0, now - timestamp) : null;
-  const fresh = lastQuoteAt !== null && lastQuoteAt !== undefined &&
-    Number.isFinite(timestamp) && ageMs <= maxAgeMs;
+  const fresh = Boolean(lastQuoteAt) && Number.isFinite(timestamp) && ageMs <= maxAgeMs;
 
-  let status = "DISCONNECTED";
-  if (fresh) status = "CONNECTED";
-  else if (reconnecting) status = "RECONNECTING";
-  else if (connected) status = "STALE";
+  let status = "disconnected";
+  if (fresh) status = "fresh";
+  else if (reconnecting) status = "reconnecting";
+  else if (connected) status = "stale";
 
   return {
     status,
@@ -26,9 +25,13 @@ export function shouldReconnectMarketFeed({
 }) {
   if (now - lastReconnectAt < cooldownMs) return false;
   if (connected && socketActive) {
-    const reference = lastQuoteAt || connectedAt;
-    const timestamp = reference ? new Date(reference).getTime() : NaN;
-    return Number.isFinite(timestamp) && now - timestamp > maxAgeMs;
+    const quoteTimestamp = lastQuoteAt ? new Date(lastQuoteAt).getTime() : NaN;
+    const connectionTimestamp = connectedAt ? new Date(connectedAt).getTime() : NaN;
+    const referenceTimestamp = Math.max(
+      Number.isFinite(quoteTimestamp) ? quoteTimestamp : 0,
+      Number.isFinite(connectionTimestamp) ? connectionTimestamp : 0
+    );
+    return referenceTimestamp > 0 && now - referenceTimestamp > maxAgeMs;
   }
   return !connected && !socketActive;
 }
