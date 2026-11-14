@@ -2,6 +2,7 @@ const MIN_OOS_TRADES = 100;
 const MIN_DATA_POINTS = 5000;
 const MIN_PROFIT_FACTOR = 1.2;
 const MAX_RESULT_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const RETIRED_STRATEGY_METHODS = new Set(["aiva_inverse_keltner_1_5_atr_v1"]);
 function finite(value) { const n=Number(value); return Number.isFinite(n)?n:null; }
 export function assessBacktestEligibility(row, nowMs=Date.now()) {
  const oos=row?.out_of_sample||{}, trades=finite(oos.trades), pf=finite(oos.profit_factor), exp=finite(oos.expectancy_points), net=finite(oos.net_pnl_points), points=finite(row?.data_points);
@@ -9,6 +10,7 @@ export function assessBacktestEligibility(row, nowMs=Date.now()) {
  const warnings=Array.isArray(row?.warnings)?row.warnings.join(" ").toLowerCase():String(row?.warnings||"").toLowerCase();
  const failures=[];
  if(!row?.method)failures.push("missing_strategy_method");
+ if(RETIRED_STRATEGY_METHODS.has(row?.method))failures.push("strategy_retired");
  if(!Number.isFinite(last)||age<0||age>MAX_RESULT_AGE_MS)failures.push("stale_or_invalid_backtest");
  if(points===null||points<MIN_DATA_POINTS)failures.push("insufficient_history");
  if(trades===null||trades<MIN_OOS_TRADES)failures.push("insufficient_oos_sample");

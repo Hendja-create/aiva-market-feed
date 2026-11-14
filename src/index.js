@@ -5,13 +5,12 @@ import { runM1ScalpingBacktest } from "./scalping-backtest.js";
 import { runVolatilityReversalBacktest } from "./volatility-reversal-backtest.js";
 import { runLiquiditySweepBacktest } from "./liquidity-sweep-backtest.js";
 import { runStrategyTournament } from "./strategy-tournament.js";
-import { runInverseKeltnerBacktest, runInverseKeltnerDemoCycle, getInverseKeltnerDemoStatus } from "./inverse-keltner-demo.js";
 import { buildQuoteSnapshot, calculateDemoPnl, getDemoExecutionCosts } from "./execution-accounting.js";
 import { runResearchCycle, getResearchStatus } from "./research-mode.js";
 import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
 import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
 import { generateSelectedStrategySignal } from "./strategy-signal.js";
-import { getMarketFeedHealth, getM1ImportRetryDelayMs } from "./market-feed-health.js";
+import { getMarketFeedHealth, getM1ImportRetryDelayMs, shouldReconnectMarketFeed } from "./market-feed-health.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -23,10 +22,18 @@ for (const key of required) {
 
 const symbols = (process.env.SYMBOLS || "XAUUSD").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
 const host = process.env.LIVE_RATES_SOCKET_HOST || "eu-wss.live-rates.com";
-const baseUrl = process.env.SUPABASE_URL.replace(/\/$/, "");
+const configuredSupabaseUrl = new URL(process.env.SUPABASE_URL);
+if (!["http:", "https:"].includes(configuredSupabaseUrl.protocol)) {
+  throw new Error("SUPABASE_URL must use http or https");
+}
+if (configuredSupabaseUrl.pathname !== "/" || configuredSupabaseUrl.search || configuredSupabaseUrl.hash) {
+  console.warn("SUPABASE_URL contains a path, query, or fragment; using the project origin only");
+}
+const baseUrl = configuredSupabaseUrl.origin;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
-let connected = false, lastQuoteAt = null, lastError = null, received = 0;
+let connected = false, lastQuoteAt = null, lastConnectedAt = null, lastError = null, received = 0;
+let lastReconnectAt = 0, reconnectCount = 0;
 const analysisRateLimit = new Map();
 let adaptiveConfidenceThreshold = 0.65;
 let autonomousCycleRunning = false;
@@ -1273,7 +1280,9 @@ async function runScheduledStrategyTournament(symbol) {
           train_boundary_at: result.train_boundary_at,
           overall: item.overall, in_sample: item.in_sample, out_of_sample: item.out_of_sample,
           assumptions: { ...item.assumptions, config: item.config, experiment_group: "independent_strategy_tournament_v1",
-            tournament_method: result.method, configurations_tested: result.configurations_tested },
+            tournament_method: result.method, configurations_tested: result.configurations_tested,
+            simulation_quality: { rejected_invalid_candles: result.rejected_invalid_candles,
+              gap_rejected_signals: result.gap_rejected_signals, cost_sensitivity: item.cost_sensitivity } },
           warnings: item.warnings, trade_details: item.trades
         })
       });
@@ -1402,7 +1411,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname === "/" || url.pathname === "/health") {
-      const marketFeed = getMarketFeedHealth({ connected, lastQuoteAt });
+      const marketFeed = getMarketFeedHealth({ connected, lastQuoteAt, connectedAt: lastConnectedAt, reconnecting: socket.active && !connected });
       return send(res, 200, {
         service: "aiva-market-feed",
         status: "alive",
@@ -1410,12 +1419,15 @@ const server = http.createServer(async (req, res) => {
         marketFeed,
         symbols,
         lastQuoteAt,
+        lastConnectedAt,
         received,
+        reconnectCount,
+        lastReconnectAt: lastReconnectAt ? new Date(lastReconnectAt).toISOString() : null,
         lastError
       });
     }
     if (url.pathname === "/ready") {
-      const marketFeed = getMarketFeedHealth({ connected, lastQuoteAt });
+      const marketFeed = getMarketFeedHealth({ connected, lastQuoteAt, connectedAt: lastConnectedAt, reconnecting: socket.active && !connected });
       const ready = connected && marketFeed.fresh;
       return send(res, ready ? 200 : 503, {
         service: "aiva-market-feed",
@@ -1478,7 +1490,9 @@ const server = http.createServer(async (req, res) => {
             train_boundary_at: result.train_boundary_at,
             overall: item.overall, in_sample: item.in_sample, out_of_sample: item.out_of_sample,
             assumptions: { ...item.assumptions, config: item.config, experiment_group: "independent_strategy_tournament_v1",
-              tournament_method: result.method, configurations_tested: result.configurations_tested },
+              tournament_method: result.method, configurations_tested: result.configurations_tested,
+            simulation_quality: { rejected_invalid_candles: result.rejected_invalid_candles,
+              gap_rejected_signals: result.gap_rejected_signals, cost_sensitivity: item.cost_sensitivity } },
             warnings: item.warnings, trade_details: item.trades
           })
         });
@@ -1760,35 +1774,6 @@ const server = http.createServer(async (req, res) => {
         interpretation: "Exploratory parameter sensitivity only. These windows are not independent if market regimes overlap conceptually; no parameter is promoted automatically."
       });
     }
-    if (url.pathname === "/api/inverse-keltner-backtest") {
-      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
-      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
-      const authHeader = String(req.headers.authorization || "");
-      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
-      const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
-      const rateKey = "inverse-keltner-backtest:" + clientIp;
-      const previousRequest = analysisRateLimit.get(rateKey) || 0;
-      const elapsed = Date.now() - previousRequest;
-      if (elapsed < 900000) return send(res, 429, { error: "backtest_rate_limited", retry_after_ms: 900000 - elapsed });
-      analysisRateLimit.set(rateKey, Date.now());
-      const result = await runInverseKeltnerBacktest(db, symbol, 80000);
-      if (!result.available) return send(res, 422, result);
-      const saved = await db("aiva_backtest_runs", {
-        method: "POST", headers: { Prefer: "return=representation" },
-        body: JSON.stringify({
-          symbol, method: "aiva_inverse_keltner_1_5_atr_v1",
-          data_points: result.data_points, first_tick_at: result.first_candle_at,
-          last_tick_at: result.last_candle_at, train_boundary_at: result.trades.find(t => t.sample === "out_of_sample")?.signal_time || null,
-          overall: result.overall, in_sample: result.in_sample, out_of_sample: result.out_of_sample,
-          assumptions: { ...result.assumptions, experiment_group: "inverse_keltner_demo_research_v1",
-            strategy: result.strategy, by_direction: result.by_direction },
-          warnings: result.warnings, trade_details: result.trades
-        })
-      });
-      result.run_id = saved?.[0]?.id || null;
-      return send(res, 200, result);
-    }
     if (url.pathname === "/api/strategy-agent-run" && req.method === "POST") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
@@ -1836,15 +1821,6 @@ const server = http.createServer(async (req, res) => {
       const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
       if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
       const result = await getResearchStatus(db, symbol);
-      return send(res, 200, result);
-    }
-    if (url.pathname === "/api/inverse-keltner-demo-status") {
-      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
-      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
-      const authHeader = String(req.headers.authorization || "");
-      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
-      const result = await getInverseKeltnerDemoStatus(db, symbol);
       return send(res, 200, result);
     }
     if (url.pathname === "/api/backtest-history") {
@@ -1955,8 +1931,8 @@ async function saveQuote(q) {
 
 const socket = io("https://" + host, { autoConnect: false, transports: ["websocket"], reconnection: true, reconnectionDelay: 1000, reconnectionDelayMax: 30000, timeout: 20000 });
 socket.on("connect", () => {
-  connected = true; lastError = null;
-  console.log("Socket connected", host, "symbols", symbols.join(","));
+  connected = true; lastConnectedAt = new Date().toISOString(); lastError = null;
+  console.log("Socket connected", host, "symbols", symbols.join(","), "reconnect_count", reconnectCount);
   socket.emit("instruments", symbols.join(","));
   socket.emit("key", process.env.LIVE_RATES_API_KEY);
 });
@@ -1976,6 +1952,40 @@ function stop(signal) {
 }
 process.on("SIGTERM", () => stop("SIGTERM"));
 process.on("SIGINT", () => stop("SIGINT"));
+
+const feedWatchdogIntervalMs = 30_000;
+const feedMaxAgeMs = 90_000;
+const feedReconnectCooldownMs = 60_000;
+setInterval(() => {
+  const now = Date.now();
+  if (!shouldReconnectMarketFeed({
+    connected,
+    socketActive: socket.active,
+    lastQuoteAt,
+    connectedAt: lastConnectedAt,
+    lastReconnectAt,
+    now,
+    maxAgeMs: feedMaxAgeMs,
+    cooldownMs: feedReconnectCooldownMs
+  })) return;
+
+  const wasStale = connected;
+  lastReconnectAt = now;
+  reconnectCount++;
+  lastError = wasStale ? "No fresh quote for more than 90 seconds; forcing socket reconnect"
+    : "Socket inactive; watchdog restarting connection";
+  console.warn("Live-Rates feed watchdog reconnect", JSON.stringify({
+    reason: wasStale ? "stale_quotes" : "socket_inactive",
+    reconnect_count: reconnectCount,
+    last_quote_at: lastQuoteAt,
+    quote_age_ms: lastQuoteAt ? now - Date.parse(lastQuoteAt) : null
+  }));
+  if (wasStale) {
+    connected = false;
+    socket.disconnect();
+  }
+  socket.connect();
+}, feedWatchdogIntervalMs).unref();
 
 const feedConnectDelayMs = Math.max(5000, Math.min(30000, Number(process.env.LIVE_RATES_CONNECT_DELAY_MS || 15000)));
 setTimeout(() => {
@@ -2031,65 +2041,10 @@ const volatilityReversalIntervalMs = Math.max(60 * 60 * 1000, Number(process.env
 setTimeout(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, 15000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, volatilityReversalIntervalMs);
 console.log("Experimental volatility reversal research scheduler enabled", volatilityReversalIntervalMs, "ms");
-let inverseKeltnerBacktestRunning = false;
-async function runScheduledInverseKeltnerBacktest(symbol) {
-  if (inverseKeltnerBacktestRunning) return;
-  inverseKeltnerBacktestRunning = true;
-  try {
-    const result = await runInverseKeltnerBacktest(db, symbol, 80000);
-    if (!result.available) {
-      console.log("Inverse Keltner backtest waiting for history", JSON.stringify(result));
-      return;
-    }
-    const saved = await db("aiva_backtest_runs", {
-      method: "POST", headers: { Prefer: "return=representation" },
-      body: JSON.stringify({
-        symbol, method: "aiva_inverse_keltner_1_5_atr_v1",
-        data_points: result.data_points, first_tick_at: result.first_candle_at,
-        last_tick_at: result.last_candle_at,
-        train_boundary_at: result.trades.find(t => t.sample === "out_of_sample")?.signal_time || null,
-        overall: result.overall, in_sample: result.in_sample, out_of_sample: result.out_of_sample,
-        assumptions: { ...result.assumptions, experiment_group: "inverse_keltner_demo_research_v1",
-          strategy: result.strategy, by_direction: result.by_direction },
-        warnings: result.warnings, trade_details: result.trades
-      })
-    });
-    console.log("Inverse Keltner backtest saved", JSON.stringify({
-      symbol, overall: result.overall, out_of_sample: result.out_of_sample,
-      by_direction: result.by_direction, run_id: saved?.[0]?.id || null
-    }));
-  } catch (error) {
-    console.error("Inverse Keltner backtest failed", error instanceof Error ? error.message : String(error));
-  } finally {
-    inverseKeltnerBacktestRunning = false;
-  }
-}
-
-let inverseKeltnerDemoRunning = false;
-async function runScheduledInverseKeltnerDemo(symbol) {
-  if (inverseKeltnerDemoRunning) return;
-  inverseKeltnerDemoRunning = true;
-  try {
-    const result = await runInverseKeltnerDemoCycle(db, symbol);
-    console.log("Inverse Keltner paper demo cycle", JSON.stringify({symbol,...result}));
-  } catch (error) {
-    console.error("Inverse Keltner paper demo error", error instanceof Error ? error.message : String(error));
-  } finally {
-    inverseKeltnerDemoRunning = false;
-  }
-}
 const strategyTournamentIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.STRATEGY_TOURNAMENT_INTERVAL_MS || 21600000));
 setTimeout(() => { for (const symbol of symbols) runScheduledStrategyTournament(symbol); }, 120000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledStrategyTournament(symbol); }, strategyTournamentIntervalMs);
 console.log("Independent strategy tournament scheduler enabled", strategyTournamentIntervalMs, "ms");
-const inverseKeltnerDemoIntervalMs = Math.max(15000, Number(process.env.INVERSE_KELTNER_DEMO_INTERVAL_MS || 30000));
-setTimeout(() => { for (const symbol of symbols) runScheduledInverseKeltnerDemo(symbol); }, 60000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledInverseKeltnerDemo(symbol); }, inverseKeltnerDemoIntervalMs);
-console.log("Inverse Keltner paper demo scheduler enabled", inverseKeltnerDemoIntervalMs, "ms; real orders disabled");
-const inverseKeltnerBacktestIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.INVERSE_KELTNER_BACKTEST_INTERVAL_MS || 21600000));
-setTimeout(() => { for (const symbol of symbols) runScheduledInverseKeltnerBacktest(symbol); }, 180000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledInverseKeltnerBacktest(symbol); }, inverseKeltnerBacktestIntervalMs);
-console.log("Inverse Keltner research backtest scheduler enabled", inverseKeltnerBacktestIntervalMs, "ms");
 const liquiditySweepIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.LIQUIDITY_SWEEP_INTERVAL_MS || 21600000));
 setTimeout(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, 45000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, liquiditySweepIntervalMs);
