@@ -28,12 +28,14 @@ small{color:#65718a}
 <label for="password">Mot de passe</label><input id="password" type="password" autocomplete="current-password" required>
 <button id="run" type="submit">Lancer le test HTTP</button>
 </form>
-<p><small>60 lectures au total, 10 par niveau : 1, 2, 4, 8, 16 et 32 requêtes simultanées. Aucun ordre, aucune insertion, aucune modification de données.</small></p>
+<p><small>Benchmark renforcé : 100 lectures par niveau, 3 répétitions, concurrence 1, 2, 4, 8, 16 et 32 (1 800 lectures au total). Lectures uniquement : aucun ordre, aucune insertion, aucune modification de données. Prévoir environ 8 à 10 minutes.</small></p>
 <pre id="result">En attente du lancement.</pre>
 </main>
 <script>
 const form=document.getElementById('login'),button=document.getElementById('run'),out=document.getElementById('result');
 const percentile=(values,p)=>{const a=[...values].sort((x,y)=>x-y);return a[Math.min(a.length-1,Math.ceil(p*a.length)-1)]??0};
+const levels=[1,2,4,8,16,32],repetitions=3,requestsPerLevel=100;
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 form.addEventListener('submit',async event=>{
  event.preventDefault();button.disabled=true;out.textContent='Connexion au projet de test…';
  let token='';
@@ -45,23 +47,47 @@ form.addEventListener('submit',async event=>{
   if(!login.ok)throw new Error('Connexion refusée. Vérifie le compte de test du projet aiva-staging.');
   token=(await login.json()).access_token;
   const results=[];
-  for(const concurrency of [1,2,4,8,16,32]){
-   const durations=[],errors=[];const started=performance.now();let completed=0;
-   while(completed<10){
-    const count=Math.min(concurrency,10-completed);
-    const batch=await Promise.all(Array.from({length:count},async()=>{
-     const t=performance.now();
-     try{const r=await fetch('/test/db-read',{headers:{Authorization:'Bearer '+token},cache:'no-store'});const b=await r.json();return {ok:r.ok&&b.ok,ms:performance.now()-t,status:r.status}}
-     catch{return {ok:false,ms:performance.now()-t,status:0}}
-    }));
-    for(const item of batch){durations.push(item.ms);if(!item.ok)errors.push(item.status)}
-    completed+=count;
+  const total=levels.length*repetitions*requestsPerLevel;
+  let finished=0;
+  for(let repetition=1;repetition<=repetitions;repetition++){
+   for(const concurrency of levels){
+    const durations=[],errors=[],authDurations=[],dbDurations=[];
+    const started=performance.now();
+    let completed=0;
+    while(completed<requestsPerLevel){
+     const count=Math.min(concurrency,requestsPerLevel-completed);
+     const batch=await Promise.all(Array.from({length:count},async()=>{
+      const t=performance.now();
+      try{
+       const r=await fetch('/test/db-read',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+       const b=await r.json();
+       return {ok:r.ok&&b.ok,ms:performance.now()-t,status:r.status,authMs:b.authDurationMs,dbMs:b.dbDurationMs};
+      }catch{return {ok:false,ms:performance.now()-t,status:0}}
+     }));
+     for(const item of batch){
+      durations.push(item.ms);
+      if(!item.ok)errors.push(item.status);
+      if(Number.isFinite(item.authMs))authDurations.push(item.authMs);
+      if(Number.isFinite(item.dbMs))dbDurations.push(item.dbMs);
+     }
+     completed+=count;finished+=count;
+     out.textContent='Benchmark en cours : répétition '+repetition+'/'+repetitions+', concurrence '+concurrency+', '+finished+'/'+total+' lectures terminées.\n'+JSON.stringify(results,null,2);
+    }
+    const elapsed=performance.now()-started;
+    results.push({
+     repetition,concurrency,requests:requestsPerLevel,errors:errors.length,
+     p50_ms:+percentile(durations,.50).toFixed(1),
+     p95_ms:+percentile(durations,.95).toFixed(1),
+     p99_ms:+percentile(durations,.99).toFixed(1),
+     auth_p50_ms:+percentile(authDurations,.50).toFixed(1),
+     db_p50_ms:+percentile(dbDurations,.50).toFixed(1),
+     throughput_rps:+(requestsPerLevel/(elapsed/1000)).toFixed(2)
+    });
+    out.textContent='Benchmark en cours : '+finished+'/'+total+' lectures terminées.\n'+JSON.stringify(results,null,2);
+    await sleep(1500);
    }
-   const elapsed=performance.now()-started;
-   results.push({concurrency,requests:10,errors:errors.length,p50_ms:+percentile(durations,.50).toFixed(1),p95_ms:+percentile(durations,.95).toFixed(1),p99_ms:+percentile(durations,.99).toFixed(1),throughput_rps:+(10/(elapsed/1000)).toFixed(2)});
-   out.textContent=JSON.stringify(results,null,2);
   }
-  out.textContent='Test terminé.\\n'+JSON.stringify(results,null,2);
+  out.textContent='Benchmark terminé : '+finished+'/'+total+' lectures.\n'+JSON.stringify(results,null,2);
  }catch(error){out.textContent='Erreur : '+error.message}
  finally{token='';button.disabled=false}
 });
