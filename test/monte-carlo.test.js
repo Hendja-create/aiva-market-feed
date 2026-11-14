@@ -53,3 +53,15 @@ test("rejects non-physical returns that could produce zero or negative prices", 
   assert.equal(runDeterministicMonteCarlo({ ...input, returns: [0.01, -1.2] }).reason, "invalid_simulation_inputs");
   assert.equal(runDeterministicMonteCarlo({ ...input, returns: [0.01, NaN] }).reason, "invalid_simulation_inputs");
 });
+
+test("requires the 100-simulation baseline used by the decision engine", () => {
+  const result = runDeterministicMonteCarlo({ ...input, sampleSizes: [500, 1000, 5000] });
+  assert.equal(result.available, false);
+  assert.equal(result.reason, "invalid_simulation_inputs");
+});
+
+test("rejects non-finite simulated price paths", () => {
+  const result = runDeterministicMonteCarlo({ ...input, returns: [Number.MAX_VALUE] });
+  assert.equal(result.available, false);
+  assert.equal(result.reason, "non_finite_simulation_path");
+});
