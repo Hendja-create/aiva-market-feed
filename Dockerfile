@@ -1,8 +1,6 @@
 FROM node:22-alpine
 WORKDIR /app
-COPY package*.json ./
-RUN npm install --omit=dev
-COPY src ./src
+COPY src/monte-carlo.js ./src/monte-carlo.js
+COPY scripts/railway-benchmark.js ./scripts/railway-benchmark.js
 ENV NODE_ENV=production
-EXPOSE 3000
-CMD ["npm", "start"]
+CMD ["node", "scripts/railway-benchmark.js"]
