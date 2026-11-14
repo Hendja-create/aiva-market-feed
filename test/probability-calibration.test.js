@@ -13,7 +13,7 @@ test("computes a three-class Brier score and directional reliability bins", () =
   assert.equal(result.multiclass_brier_score, 0.04);
   assert.equal(result.directional_ece, 0.2);
   assert.deepEqual(result.bins, [{
-    range: "[0.6, 0.8)",
+    range: "[0.8, 1]",
     observations: 2,
     mean_confidence: 0.8,
     observed_accuracy: 1,
