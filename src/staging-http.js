@@ -61,7 +61,7 @@ form.addEventListener('submit',async event=>{
    results.push({concurrency,requests:10,errors:errors.length,p50_ms:+percentile(durations,.50).toFixed(1),p95_ms:+percentile(durations,.95).toFixed(1),p99_ms:+percentile(durations,.99).toFixed(1),throughput_rps:+(10/(elapsed/1000)).toFixed(2)});
    out.textContent=JSON.stringify(results,null,2);
   }
-  out.textContent='Test terminé.\n'+JSON.stringify(results,null,2);
+  out.textContent='Test terminé.\\n'+JSON.stringify(results,null,2);
  }catch(error){out.textContent='Erreur : '+error.message}
  finally{token='';button.disabled=false}
 });
