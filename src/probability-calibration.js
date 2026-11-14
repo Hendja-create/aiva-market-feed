@@ -7,6 +7,8 @@ function round(value, digits = 4) {
 }
 
 function normalizeProbabilities(row) {
+  if (row?.probability_up === null || row?.probability_up === undefined || row?.probability_up === "" ||
+      row?.probability_down === null || row?.probability_down === undefined || row?.probability_down === "") return null;
   const up = Number(row.probability_up);
   const down = Number(row.probability_down);
   if (!Number.isFinite(up) || !Number.isFinite(down) || up < 0 || down < 0 || up > 1 || down > 1) return null;
@@ -20,8 +22,9 @@ function normalizeProbabilities(row) {
 
 export function summarizeProbabilityCalibration(rows, minimumObservations = 30) {
   const valid = [];
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const probabilities = normalizeProbabilities(row || {});
+  for (const candidate of Array.isArray(rows) ? rows : []) {
+    const row = candidate && typeof candidate === "object" ? candidate : {};
+    const probabilities = normalizeProbabilities(row);
     if (!probabilities || !DIRECTIONS.includes(row.actual_direction)) continue;
     valid.push({ row, probabilities, actualIndex: DIRECTIONS.indexOf(row.actual_direction) });
   }
