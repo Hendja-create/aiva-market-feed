@@ -1280,7 +1280,9 @@ async function runScheduledStrategyTournament(symbol) {
           train_boundary_at: result.train_boundary_at,
           overall: item.overall, in_sample: item.in_sample, out_of_sample: item.out_of_sample,
           assumptions: { ...item.assumptions, config: item.config, experiment_group: "independent_strategy_tournament_v1",
-            tournament_method: result.method, configurations_tested: result.configurations_tested },
+            tournament_method: result.method, configurations_tested: result.configurations_tested,
+            simulation_quality: { rejected_invalid_candles: result.rejected_invalid_candles,
+              gap_rejected_signals: result.gap_rejected_signals, cost_sensitivity: item.cost_sensitivity } },
           warnings: item.warnings, trade_details: item.trades
         })
       });
@@ -1488,7 +1490,9 @@ const server = http.createServer(async (req, res) => {
             train_boundary_at: result.train_boundary_at,
             overall: item.overall, in_sample: item.in_sample, out_of_sample: item.out_of_sample,
             assumptions: { ...item.assumptions, config: item.config, experiment_group: "independent_strategy_tournament_v1",
-              tournament_method: result.method, configurations_tested: result.configurations_tested },
+              tournament_method: result.method, configurations_tested: result.configurations_tested,
+            simulation_quality: { rejected_invalid_candles: result.rejected_invalid_candles,
+              gap_rejected_signals: result.gap_rejected_signals, cost_sensitivity: item.cost_sensitivity } },
             warnings: item.warnings, trade_details: item.trades
           })
         });
