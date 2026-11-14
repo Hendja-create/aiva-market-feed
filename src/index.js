@@ -11,7 +11,7 @@ import { runResearchCycle, getResearchStatus } from "./research-mode.js";
 import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
 import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
 import { generateSelectedStrategySignal } from "./strategy-signal.js";
-import { getMarketFeedHealth, getM1ImportRetryDelayMs } from "./market-feed-health.js";
+import { getMarketFeedHealth, getM1ImportRetryDelayMs, shouldReconnectMarketFeed } from "./market-feed-health.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -26,7 +26,8 @@ const host = process.env.LIVE_RATES_SOCKET_HOST || "eu-wss.live-rates.com";
 const baseUrl = process.env.SUPABASE_URL.replace(/\/$/, "");
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
-let connected = false, lastQuoteAt = null, lastError = null, received = 0;
+let connected = false, lastQuoteAt = null, lastConnectedAt = null, lastError = null, received = 0;
+let lastReconnectAt = 0, reconnectCount = 0;
 const analysisRateLimit = new Map();
 let adaptiveConfidenceThreshold = 0.65;
 let autonomousCycleRunning = false;
@@ -1402,7 +1403,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname === "/" || url.pathname === "/health") {
-      const marketFeed = getMarketFeedHealth({ connected, lastQuoteAt });
+      const marketFeed = getMarketFeedHealth({ connected, lastQuoteAt, connectedAt: lastConnectedAt, reconnecting: socket.active && !connected });
       return send(res, 200, {
         service: "aiva-market-feed",
         status: "alive",
@@ -1410,12 +1411,15 @@ const server = http.createServer(async (req, res) => {
         marketFeed,
         symbols,
         lastQuoteAt,
+        lastConnectedAt,
         received,
+        reconnectCount,
+        lastReconnectAt: lastReconnectAt ? new Date(lastReconnectAt).toISOString() : null,
         lastError
       });
     }
     if (url.pathname === "/ready") {
-      const marketFeed = getMarketFeedHealth({ connected, lastQuoteAt });
+      const marketFeed = getMarketFeedHealth({ connected, lastQuoteAt, connectedAt: lastConnectedAt, reconnecting: socket.active && !connected });
       const ready = connected && marketFeed.fresh;
       return send(res, ready ? 200 : 503, {
         service: "aiva-market-feed",
@@ -1955,8 +1959,8 @@ async function saveQuote(q) {
 
 const socket = io("https://" + host, { autoConnect: false, transports: ["websocket"], reconnection: true, reconnectionDelay: 1000, reconnectionDelayMax: 30000, timeout: 20000 });
 socket.on("connect", () => {
-  connected = true; lastError = null;
-  console.log("Socket connected", host, "symbols", symbols.join(","));
+  connected = true; lastConnectedAt = new Date().toISOString(); lastError = null;
+  console.log("Socket connected", host, "symbols", symbols.join(","), "reconnect_count", reconnectCount);
   socket.emit("instruments", symbols.join(","));
   socket.emit("key", process.env.LIVE_RATES_API_KEY);
 });
@@ -1976,6 +1980,40 @@ function stop(signal) {
 }
 process.on("SIGTERM", () => stop("SIGTERM"));
 process.on("SIGINT", () => stop("SIGINT"));
+
+const feedWatchdogIntervalMs = 30_000;
+const feedMaxAgeMs = 90_000;
+const feedReconnectCooldownMs = 60_000;
+setInterval(() => {
+  const now = Date.now();
+  if (!shouldReconnectMarketFeed({
+    connected,
+    socketActive: socket.active,
+    lastQuoteAt,
+    connectedAt: lastConnectedAt,
+    lastReconnectAt,
+    now,
+    maxAgeMs: feedMaxAgeMs,
+    cooldownMs: feedReconnectCooldownMs
+  })) return;
+
+  const wasStale = connected;
+  lastReconnectAt = now;
+  reconnectCount++;
+  lastError = wasStale ? "No fresh quote for more than 90 seconds; forcing socket reconnect"
+    : "Socket inactive; watchdog restarting connection";
+  console.warn("Live-Rates feed watchdog reconnect", JSON.stringify({
+    reason: wasStale ? "stale_quotes" : "socket_inactive",
+    reconnect_count: reconnectCount,
+    last_quote_at: lastQuoteAt,
+    quote_age_ms: lastQuoteAt ? now - Date.parse(lastQuoteAt) : null
+  }));
+  if (wasStale) {
+    connected = false;
+    socket.disconnect();
+  }
+  socket.connect();
+}, feedWatchdogIntervalMs).unref();
 
 const feedConnectDelayMs = Math.max(5000, Math.min(30000, Number(process.env.LIVE_RATES_CONNECT_DELAY_MS || 15000)));
 setTimeout(() => {
