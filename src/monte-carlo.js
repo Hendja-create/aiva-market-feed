@@ -56,7 +56,7 @@ export function runDeterministicMonteCarlo({
   const sizes = [...new Set(sampleSizes.map(Number).filter(value =>
     Number.isInteger(value) && value > 0 && value <= 20000
   ))].sort((a, b) => a - b);
-  if (!(Number.isFinite(current) && current > 0) ||
+  if (!sizes.includes(100) || !(Number.isFinite(current) && current > 0) ||
       !(Number.isFinite(spread) && spread >= 0) || !(Number.isFinite(sigma) && sigma >= 0) ||
       !Number.isInteger(horizon) || horizon < 1 || !Number.isInteger(blockLength) || blockLength < 1 ||
       !sizes.length) {
@@ -81,6 +81,9 @@ export function runDeterministicMonteCarlo({
       const startIndex = Math.floor(random() * cleanReturns.length);
       for (let j = 0; j < blockLength && step < horizon; j++, step++) {
         price *= 1 + cleanReturns[(startIndex + j) % cleanReturns.length];
+        if (!Number.isFinite(price) || price <= 0) {
+          return { available: false, reason: "non_finite_simulation_path", sample_sizes: [] };
+        }
         pathHigh = Math.max(pathHigh, price);
         pathLow = Math.min(pathLow, price);
       }
