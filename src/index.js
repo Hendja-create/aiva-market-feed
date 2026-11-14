@@ -23,7 +23,14 @@ for (const key of required) {
 
 const symbols = (process.env.SYMBOLS || "XAUUSD").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
 const host = process.env.LIVE_RATES_SOCKET_HOST || "eu-wss.live-rates.com";
-const baseUrl = process.env.SUPABASE_URL.replace(/\/$/, "");
+const configuredSupabaseUrl = new URL(process.env.SUPABASE_URL);
+if (!["http:", "https:"].includes(configuredSupabaseUrl.protocol)) {
+  throw new Error("SUPABASE_URL must use http or https");
+}
+if (configuredSupabaseUrl.pathname !== "/" || configuredSupabaseUrl.search || configuredSupabaseUrl.hash) {
+  console.warn("SUPABASE_URL contains a path, query, or fragment; using the project origin only");
+}
+const baseUrl = configuredSupabaseUrl.origin;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
 let connected = false, lastQuoteAt = null, lastConnectedAt = null, lastError = null, received = 0;
