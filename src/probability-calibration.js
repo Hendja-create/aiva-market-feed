@@ -1,6 +1,5 @@
 const DIRECTIONS = ["UP", "DOWN", "FLAT"];
 const BIN_COUNT = 5;
-const MIN_CONFIDENCE = 0.5;
 
 function round(value, digits = 4) {
   return Number(value.toFixed(digits));
@@ -29,6 +28,9 @@ export function summarizeProbabilityCalibration(rows, minimumObservations = 30) 
     valid.push({ row, probabilities, actualIndex: DIRECTIONS.indexOf(row.actual_direction) });
   }
 
+  const brierStatus = valid.length === 0
+    ? "no_valid_observations"
+    : valid.length >= minimumObservations ? "measured" : "insufficient_sample";
   if (!valid.length) {
     return {
       observations: 0,
@@ -36,8 +38,11 @@ export function summarizeProbabilityCalibration(rows, minimumObservations = 30) 
       multiclass_brier_score: null,
       directional_ece: null,
       bins: [],
-      status: "no_valid_observations",
-      minimum_observations: minimumObservations
+      status: brierStatus,
+      brier_status: brierStatus,
+      directional_ece_status: "no_directional_observations",
+      minimum_observations: minimumObservations,
+      minimum_directional_observations: minimumObservations
     };
   }
 
@@ -47,8 +52,8 @@ export function summarizeProbabilityCalibration(rows, minimumObservations = 30) 
   }, 0) / valid.length;
 
   const bins = Array.from({ length: BIN_COUNT }, (_, index) => ({
-    lower: MIN_CONFIDENCE + index * 0.1,
-    upper: MIN_CONFIDENCE + (index + 1) * 0.1,
+    lower: index / BIN_COUNT,
+    upper: (index + 1) / BIN_COUNT,
     count: 0,
     confidenceSum: 0,
     correct: 0
@@ -60,8 +65,7 @@ export function summarizeProbabilityCalibration(rows, minimumObservations = 30) 
     const directionIndex = decision === "BUY" ? 0 : 1;
     const confidence = item.probabilities[directionIndex];
     directionalObservations++;
-    if (confidence < MIN_CONFIDENCE) continue;
-    const binIndex = Math.min(BIN_COUNT - 1, Math.floor((confidence - MIN_CONFIDENCE) / 0.1));
+    const binIndex = Math.min(BIN_COUNT - 1, Math.floor(confidence * BIN_COUNT));
     const bin = bins[binIndex];
     bin.count++;
     bin.confidenceSum += confidence;
@@ -79,10 +83,12 @@ export function summarizeProbabilityCalibration(rows, minimumObservations = 30) 
       calibration_gap: round(Math.abs(meanConfidence - accuracy))
     };
   });
-  const binnedCount = populatedBins.reduce((sum, bin) => sum + bin.observations, 0);
-  const ece = binnedCount
-    ? populatedBins.reduce((sum, bin) => sum + bin.observations * bin.calibration_gap, 0) / binnedCount
+  const ece = directionalObservations
+    ? populatedBins.reduce((sum, bin) => sum + bin.observations * bin.calibration_gap, 0) / directionalObservations
     : null;
+  const directionalEceStatus = directionalObservations === 0
+    ? "no_directional_observations"
+    : directionalObservations >= minimumObservations ? "measured" : "insufficient_sample";
 
   return {
     observations: valid.length,
@@ -90,8 +96,11 @@ export function summarizeProbabilityCalibration(rows, minimumObservations = 30) 
     multiclass_brier_score: round(brier),
     directional_ece: ece === null ? null : round(ece),
     bins: populatedBins,
-    status: valid.length >= minimumObservations ? "measured" : "insufficient_sample",
+    status: brierStatus,
+    brier_status: brierStatus,
+    directional_ece_status: directionalEceStatus,
     minimum_observations: minimumObservations,
+    minimum_directional_observations: minimumObservations,
     note: "Diagnostic only. This score does not change confidence thresholds or enable a strategy."
   };
 }
