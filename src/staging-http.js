@@ -26,7 +26,7 @@ small{color:#65718a}
 <form id="login">
 <label for="email">E-mail du compte de test</label><input id="email" type="email" autocomplete="username" required>
 <label for="password">Mot de passe</label><input id="password" type="password" autocomplete="current-password" required>
-<button id="run" type="button" onclick="document.getElementById('result').textContent='Clic reçu : JavaScript du navigateur actif.'">Lancer le test HTTP</button>
+<button id="run" type="button" onclick="const e=document.getElementById('email').value.trim(),p=document.getElementById('password').value,o=document.getElementById('result');if(!e||!p){o.textContent='Saisis l’e-mail et le mot de passe du compte de test.';}else if(typeof window.aivaRunBenchmark==='function'){window.aivaRunBenchmark();}else{o.textContent='Erreur : le script du benchmark ne s’est pas initialisé. Recharge la page et consulte la console.';}">Lancer le test HTTP</button>
 </form>
 <p><small>Benchmark renforcé : 100 lectures par niveau, 3 répétitions, concurrence 1, 2, 4, 8, 16 et 32 (1 800 lectures au total). Lectures uniquement : aucun ordre, aucune insertion, aucune modification de données. Prévoir environ 8 à 10 minutes.</small></p>
 <pre id="result">En attente du lancement.</pre>
@@ -37,7 +37,7 @@ const form=document.getElementById('login'),button=document.getElementById('run'
 const percentile=(values,p)=>{const a=[...values].sort((x,y)=>x-y);return a[Math.min(a.length-1,Math.ceil(p*a.length)-1)]??0};
 const levels=[1,2,4,8,16,32],repetitions=3,requestsPerLevel=100;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-button.addEventListener('click',async()=>{
+window.aivaRunBenchmark=async()=>{
  const email=document.getElementById('email').value.trim(),password=document.getElementById('password').value;
  if(!email||!password){out.textContent='Saisis l’e-mail et le mot de passe du compte de test.';return;}
  button.disabled=true;out.textContent='Étape 1/2 : connexion au projet de test…';
@@ -93,7 +93,7 @@ button.addEventListener('click',async()=>{
   out.textContent='Benchmark terminé : '+finished+'/'+total+' lectures.\n'+JSON.stringify(results,null,2);
  }catch(error){out.textContent='Erreur : '+error.message}
  finally{token='';button.disabled=false}
-});
+};
 </script></body></html>`;
 
 function json(res, status, body) {
