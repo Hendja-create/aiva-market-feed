@@ -1893,6 +1893,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, result);
       } catch (error) {
         if (error?.code === "AIVA_ANALYSIS_QUEUE_FULL") {
+          if (analysisRateLimit.get(clientIp) === now) analysisRateLimit.delete(clientIp);
           return send(res, 503, { error: "analysis_queue_full", retry_after_ms: 1000,
             message: "Le moteur d’analyse est momentanément saturé. Réessayez dans un instant." });
         }

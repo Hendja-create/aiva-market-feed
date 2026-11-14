@@ -75,6 +75,7 @@ export class MonteCarloWorkerPool {
         slot.task = null;
         slot.busy = false;
         task.reject(error);
+        this.dispatch();
       }
     }
   }
