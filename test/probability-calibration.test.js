@@ -13,13 +13,14 @@ test("computes a three-class Brier score and directional reliability bins", () =
   assert.equal(result.multiclass_brier_score, 0.04);
   assert.equal(result.directional_ece, 0.2);
   assert.deepEqual(result.bins, [{
-    range: "[0.8, 0.9)",
+    range: "[0.6, 0.8)",
     observations: 2,
     mean_confidence: 0.8,
     observed_accuracy: 1,
     calibration_gap: 0.2
   }]);
-  assert.equal(result.status, "insufficient_sample");
+  assert.equal(result.brier_status, "insufficient_sample");
+  assert.equal(result.directional_ece_status, "insufficient_sample");
 });
 
 test("ignores malformed probabilities and unknown outcomes", () => {
@@ -33,27 +34,32 @@ test("ignores malformed probabilities and unknown outcomes", () => {
   assert.equal(result.observations, 0);
   assert.equal(result.multiclass_brier_score, null);
   assert.equal(result.status, "no_valid_observations");
+  assert.equal(result.directional_ece_status, "no_directional_observations");
 });
 
-test("includes low-confidence and NO_TRADE forecasts in Brier score but not directional ECE bins", () => {
+test("includes low-confidence forecasts in directional ECE bins and Brier score", () => {
   const result = summarizeProbabilityCalibration([
     { decision: "BUY", probability_up: 0.45, probability_down: 0.4, actual_direction: "UP" },
     { decision: "NO_TRADE", probability_up: 0.2, probability_down: 0.2, actual_direction: "FLAT" }
   ]);
   assert.equal(result.observations, 2);
   assert.equal(result.directional_observations, 1);
-  assert.equal(result.bins.length, 0);
-  assert.equal(result.directional_ece, null);
+  assert.equal(result.bins.length, 1);
+  assert.equal(result.bins[0].range, "[0.4, 0.6)");
+  assert.equal(result.directional_ece, 0.55);
+  assert.equal(result.directional_ece_status, "insufficient_sample");
 });
 
-test("marks calibration measured only after the configured minimum sample", () => {
-  const rows = Array.from({ length: 30 }, () => ({
-    decision: "BUY",
+test("separates Brier and directional ECE sample sufficiency", () => {
+  const rows = Array.from({ length: 30 }, (_, index) => ({
+    decision: index === 0 ? "BUY" : "NO_TRADE",
     probability_up: 0.7,
     probability_down: 0.2,
     actual_direction: "UP"
   }));
   const result = summarizeProbabilityCalibration(rows);
   assert.equal(result.observations, 30);
-  assert.equal(result.status, "measured");
+  assert.equal(result.brier_status, "measured");
+  assert.equal(result.directional_observations, 1);
+  assert.equal(result.directional_ece_status, "insufficient_sample");
 });
