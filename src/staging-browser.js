@@ -133,3 +133,137 @@ window.aivaRunBenchmark = async function () {
     button.disabled = false;
   }
 };
+
+
+window.aivaRunEndurance = async function () {
+  var email = document.getElementById("email").value.trim();
+  var password = document.getElementById("password").value;
+  var buttons = [document.getElementById("run"), document.getElementById("endurance")];
+  var out = document.getElementById("result");
+  if (!email || !password) {
+    out.textContent = "Saisis l’e-mail et le mot de passe du compte de test.";
+    return;
+  }
+  buttons.forEach(function (button) { if (button) button.disabled = true; });
+  out.textContent = "Connexion au projet de test pour le test d’endurance…";
+  var token = "";
+  var levels = [16, 32];
+  var requestsPerLevel = 1000;
+  var timeoutMs = 10000;
+  var finished = 0;
+  var total = levels.length * requestsPerLevel;
+  var results = [];
+
+  function percentile(values, p) {
+    if (!values.length) return null;
+    var sorted = values.slice().sort(function (a, b) { return a - b; });
+    return sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)];
+  }
+  function metric(values, p) {
+    var value = percentile(values, p);
+    return value === null ? null : +value.toFixed(1);
+  }
+
+  try {
+    var cfgResponse = await fetch("/test/config", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!cfgResponse.ok) throw new Error("Impossible de lire la configuration du test.");
+    var cfg = await cfgResponse.json();
+    if (!cfg.configured) throw new Error("Configuration Supabase incomplète.");
+
+    var loginResponse = await fetch(cfg.supabaseUrl + "/auth/v1/token?grant_type=password", {
+      method: "POST",
+      headers: { apikey: cfg.publishableKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email, password: password }),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    document.getElementById("password").value = "";
+    if (!loginResponse.ok) throw new Error("Connexion refusée. Vérifie le compte de test du projet aiva-staging.");
+    var loginData = await loginResponse.json();
+    token = loginData.access_token;
+    if (!token) throw new Error("Supabase n’a pas retourné de jeton de session.");
+
+    for (var li = 0; li < levels.length; li++) {
+      var concurrency = levels[li];
+      var durations = [];
+      var authDurations = [];
+      var dbDurations = [];
+      var errors = 0;
+      var timeouts = 0;
+      var networkErrors = 0;
+      var statusCounts = {};
+      var started = performance.now();
+      var nextIndex = 0;
+
+      async function worker() {
+        while (true) {
+          var index = nextIndex++;
+          if (index >= requestsPerLevel) return;
+          var requestStarted = performance.now();
+          try {
+            var response = await fetch("/test/db-read", {
+              headers: { Authorization: "Bearer " + token },
+              cache: "no-store",
+              signal: AbortSignal.timeout(timeoutMs)
+            });
+            var body = await response.json();
+            durations.push(performance.now() - requestStarted);
+            statusCounts[response.status] = (statusCounts[response.status] || 0) + 1;
+            if (!response.ok || !body.ok) {
+              errors++;
+            } else {
+              if (typeof body.authDurationMs === "number") authDurations.push(body.authDurationMs);
+              if (typeof body.dbDurationMs === "number") dbDurations.push(body.dbDurationMs);
+            }
+          } catch (error) {
+            durations.push(performance.now() - requestStarted);
+            errors++;
+            if (error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+              timeouts++;
+              statusCounts.timeout = (statusCounts.timeout || 0) + 1;
+            } else {
+              networkErrors++;
+              statusCounts.network_error = (statusCounts.network_error || 0) + 1;
+            }
+          } finally {
+            finished++;
+            out.textContent = "Test d’endurance : concurrence " + concurrency +
+              ", " + finished + "/" + total + " lectures terminées.";
+          }
+        }
+      }
+
+      var workers = [];
+      for (var w = 0; w < concurrency; w++) workers.push(worker());
+      await Promise.all(workers);
+      var elapsedMs = performance.now() - started;
+      results.push({
+        concurrency: concurrency,
+        requests: requestsPerLevel,
+        errors: errors,
+        timeouts: timeouts,
+        network_errors: networkErrors,
+        p50_ms: metric(durations, 0.50),
+        p95_ms: metric(durations, 0.95),
+        p99_ms: metric(durations, 0.99),
+        auth_p50_ms: metric(authDurations, 0.50),
+        db_p50_ms: metric(dbDurations, 0.50),
+        throughput_rps: +(requestsPerLevel / (elapsedMs / 1000)).toFixed(2),
+        elapsed_seconds: +(elapsedMs / 1000).toFixed(1),
+        status_counts: statusCounts
+      });
+      out.textContent = "Test en cours : " + finished + "/" + total +
+        " lectures.\n" + JSON.stringify(results, null, 2);
+    }
+    out.textContent = "Test d’endurance terminé : " + finished + "/" + total +
+      " lectures. Timeout par requête : " + (timeoutMs / 1000) +
+      " s.\n" + JSON.stringify(results, null, 2);
+  } catch (error) {
+    out.textContent = "Erreur : " + (error && error.message ? error.message : "échec inattendu");
+  } finally {
+    token = "";
+    buttons.forEach(function (button) { if (button) button.disabled = false; });
+  }
+};
