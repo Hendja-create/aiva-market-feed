@@ -33,67 +33,94 @@ small{color:#65718a}
 <noscript><p style="color:#b42318;font-weight:700">JavaScript est désactivé dans ce navigateur. Active-le pour lancer le test.</p></noscript>
 </main>
 <script>
-const form=document.getElementById('login'),button=document.getElementById('run'),out=document.getElementById('result');
-const percentile=(values,p)=>{const a=[...values].sort((x,y)=>x-y);return a[Math.min(a.length-1,Math.ceil(p*a.length)-1)]??0};
-const levels=[1,2,4,8,16,32],repetitions=3,requestsPerLevel=100;
-const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-window.aivaRunBenchmark=async()=>{
- const email=document.getElementById('email').value.trim(),password=document.getElementById('password').value;
- if(!email||!password){out.textContent='Saisis l’e-mail et le mot de passe du compte de test.';return;}
- button.disabled=true;out.textContent='Étape 1/2 : connexion au projet de test…';
- let token='';
- try{
-  const cfg=await fetch('/test/config',{cache:'no-store'}).then(r=>r.json());
-  if(!cfg.configured)throw new Error('Configuration Supabase incomplète.');
-  const login=await fetch(cfg.supabaseUrl+'/auth/v1/token?grant_type=password',{method:'POST',headers:{apikey:cfg.publishableKey,'Content-Type':'application/json'},body:JSON.stringify({email,password})});
-  document.getElementById('password').value='';
-  if(!login.ok)throw new Error('Connexion refusée. Vérifie le compte de test du projet aiva-staging.');
-  token=(await login.json()).access_token;
-  const results=[];
-  const total=levels.length*repetitions*requestsPerLevel;
-  let finished=0;
-  for(let repetition=1;repetition<=repetitions;repetition++){
-   for(const concurrency of levels){
-    const durations=[],errors=[],authDurations=[],dbDurations=[];
-    const started=performance.now();
-    let completed=0;
-    while(completed<requestsPerLevel){
-     const count=Math.min(concurrency,requestsPerLevel-completed);
-     const batch=await Promise.all(Array.from({length:count},async()=>{
-      const t=performance.now();
-      try{
-       const r=await fetch('/test/db-read',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
-       const b=await r.json();
-       return {ok:r.ok&&b.ok,ms:performance.now()-t,status:r.status,authMs:b.authDurationMs,dbMs:b.dbDurationMs};
-      }catch{return {ok:false,ms:performance.now()-t,status:0}}
-     }));
-     for(const item of batch){
-      durations.push(item.ms);
-      if(!item.ok)errors.push(item.status);
-      if(Number.isFinite(item.authMs))authDurations.push(item.authMs);
-      if(Number.isFinite(item.dbMs))dbDurations.push(item.dbMs);
-     }
-     completed+=count;finished+=count;
-     out.textContent='Benchmark en cours : répétition '+repetition+'/'+repetitions+', concurrence '+concurrency+', '+finished+'/'+total+' lectures terminées.\n'+JSON.stringify(results,null,2);
-    }
-    const elapsed=performance.now()-started;
-    results.push({
-     repetition,concurrency,requests:requestsPerLevel,errors:errors.length,
-     p50_ms:+percentile(durations,.50).toFixed(1),
-     p95_ms:+percentile(durations,.95).toFixed(1),
-     p99_ms:+percentile(durations,.99).toFixed(1),
-     auth_p50_ms:+percentile(authDurations,.50).toFixed(1),
-     db_p50_ms:+percentile(dbDurations,.50).toFixed(1),
-     throughput_rps:+(requestsPerLevel/(elapsed/1000)).toFixed(2)
-    });
-    out.textContent='Benchmark en cours : '+finished+'/'+total+' lectures terminées.\n'+JSON.stringify(results,null,2);
-    await sleep(1500);
-   }
+window.aivaRunBenchmark = async function () {
+  var email = document.getElementById("email").value.trim();
+  var password = document.getElementById("password").value;
+  var button = document.getElementById("run");
+  var out = document.getElementById("result");
+  if (!email || !password) {
+    out.textContent = "Saisis l’e-mail et le mot de passe du compte de test.";
+    return;
   }
-  out.textContent='Benchmark terminé : '+finished+'/'+total+' lectures.\n'+JSON.stringify(results,null,2);
- }catch(error){out.textContent='Erreur : '+error.message}
- finally{token='';button.disabled=false}
+  button.disabled = true;
+  out.textContent = "Étape 1/2 : connexion au projet de test…";
+  var token = "";
+  var levels = [1, 2, 4, 8, 16, 32];
+  var results = [];
+  var total = 1800;
+  var finished = 0;
+  function percentile(values, p) {
+    if (!values.length) return 0;
+    values.sort(function(a,b){ return a-b; });
+    return values[Math.min(values.length-1, Math.ceil(p*values.length)-1)];
+  }
+  function wait(ms) { return new Promise(function(resolve){ setTimeout(resolve,ms); }); }
+  try {
+    var cfgResponse = await fetch("/test/config", {cache:"no-store"});
+    var cfg = await cfgResponse.json();
+    if (!cfg.configured) throw new Error("Configuration Supabase incomplète.");
+    var loginResponse = await fetch(cfg.supabaseUrl + "/auth/v1/token?grant_type=password", {
+      method:"POST",
+      headers:{apikey:cfg.publishableKey,"Content-Type":"application/json"},
+      body:JSON.stringify({email:email,password:password})
+    });
+    document.getElementById("password").value = "";
+    if (!loginResponse.ok) throw new Error("Connexion refusée. Vérifie le compte de test du projet aiva-staging.");
+    var loginData = await loginResponse.json();
+    token = loginData.access_token;
+    if (!token) throw new Error("Supabase n’a pas retourné de jeton de session.");
+    for (var repetition=1; repetition<=3; repetition++) {
+      for (var li=0; li<levels.length; li++) {
+        var concurrency = levels[li];
+        var durations=[], authDurations=[], dbDurations=[], errors=0;
+        var started=performance.now();
+        var completed=0;
+        while (completed<100) {
+          var count=Math.min(concurrency,100-completed);
+          var jobs=[];
+          for (var j=0;j<count;j++) {
+            jobs.push((async function(){
+              var t=performance.now();
+              try {
+                var response=await fetch("/test/db-read",{headers:{Authorization:"Bearer "+token},cache:"no-store"});
+                var body=await response.json();
+                return {ok:response.ok && body.ok,ms:performance.now()-t,status:response.status,authMs:body.authDurationMs,dbMs:body.dbDurationMs};
+              } catch(e) { return {ok:false,ms:performance.now()-t,status:0}; }
+            })());
+          }
+          var batch=await Promise.all(jobs);
+          for(var k=0;k<batch.length;k++) {
+            var item=batch[k]; durations.push(item.ms);
+            if(!item.ok) errors++;
+            if(typeof item.authMs==="number") authDurations.push(item.authMs);
+            if(typeof item.dbMs==="number") dbDurations.push(item.dbMs);
+          }
+          completed+=count; finished+=count;
+          out.textContent="Benchmark en cours : répétition "+repetition+"/3, concurrence "+concurrency+", "+finished+"/"+total+" lectures terminées.";
+        }
+        var elapsed=performance.now()-started;
+        results.push({
+          repetition:repetition,concurrency:concurrency,requests:100,errors:errors,
+          p50_ms:+percentile(durations,.50).toFixed(1),
+          p95_ms:+percentile(durations,.95).toFixed(1),
+          p99_ms:+percentile(durations,.99).toFixed(1),
+          auth_p50_ms:+percentile(authDurations,.50).toFixed(1),
+          db_p50_ms:+percentile(dbDurations,.50).toFixed(1),
+          throughput_rps:+(100/(elapsed/1000)).toFixed(2)
+        });
+        out.textContent="Benchmark en cours : "+finished+"/"+total+" lectures terminées.\n"+JSON.stringify(results,null,2);
+        await wait(1500);
+      }
+    }
+    out.textContent="Benchmark terminé : "+finished+"/"+total+" lectures.\n"+JSON.stringify(results,null,2);
+  } catch(error) {
+    out.textContent="Erreur : "+(error && error.message ? error.message : "échec inattendu");
+  } finally {
+    token="";
+    button.disabled=false;
+  }
 };
+window.aivaScriptLoaded = true;
 </script></body></html>`;
 
 function json(res, status, body) {
