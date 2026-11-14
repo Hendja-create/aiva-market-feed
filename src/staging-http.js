@@ -27,9 +27,10 @@ small{color:#65718a}
 <form id="login">
 <label for="email">E-mail du compte de test</label><input id="email" type="email" autocomplete="username" required>
 <label for="password">Mot de passe</label><input id="password" type="password" autocomplete="current-password" required>
-<button id="run" type="button" onclick="const e=document.getElementById('email').value.trim(),p=document.getElementById('password').value,o=document.getElementById('result');if(!e||!p){o.textContent='Saisis l’e-mail et le mot de passe du compte de test.';}else if(typeof window.aivaRunBenchmark==='function'){window.aivaRunBenchmark();}else{o.textContent='Erreur : le script du benchmark ne s’est pas initialisé. Recharge la page et consulte la console.';}">Lancer le test HTTP</button>
+<button id="run" type="button" onclick="const e=document.getElementById('email').value.trim(),p=document.getElementById('password').value,o=document.getElementById('result');if(!e||!p){o.textContent='Saisis l’e-mail et le mot de passe du compte de test.';}else if(typeof window.aivaRunBenchmark==='function'){window.aivaRunBenchmark();}else{o.textContent='Erreur : le script du benchmark ne s’est pas initialisé. Recharge la page et consulte la console.';}">Benchmark standard (900 lectures)</button>
+<button id="endurance" type="button" onclick="const e=document.getElementById('email').value.trim(),p=document.getElementById('password').value,o=document.getElementById('result');if(!e||!p){o.textContent='Saisis l’e-mail et le mot de passe du compte de test.';}else if(typeof window.aivaRunEndurance==='function'){window.aivaRunEndurance();}else{o.textContent='Erreur : le test d’endurance ne s’est pas initialisé. Recharge la page.';}">Test d’endurance (2 000 lectures)</button>
 </form>
-<p><small>Benchmark renforcé : 100 lectures par niveau, 3 répétitions, concurrence 1, 2, 4, 8, 16 et 32 (1 800 lectures au total). Lectures uniquement : aucun ordre, aucune insertion, aucune modification de données. Prévoir environ 8 à 10 minutes.</small></p>
+<p><small>Benchmark standard : 900 lectures (8, 16 et 32 connexions, 3 répétitions). Test d’endurance : 1 000 lectures à 16 connexions puis 1 000 à 32. Lectures uniquement sur aiva_staging_probe : aucun ordre, aucune insertion, aucune modification. Le test d’endurance peut prendre plusieurs minutes.</small></p>
 <pre id="result">En attente du lancement.</pre>
 <noscript><p style="color:#b42318;font-weight:700">JavaScript est désactivé dans ce navigateur. Active-le pour lancer le test.</p></noscript>
 </main>
