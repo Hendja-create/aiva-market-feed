@@ -105,11 +105,13 @@ async function verifyStrategyAgentAdmin(token) {
 // They do not authorize or block intraday scalping entries until independently validated.
 const historicalContextCache = new Map();
 let historicalImportRunning = false;
-let historicalM1ImportRunning = false;
-let historicalM1LastRun = null;
-let historicalM1RetryAfter = 0;
-let historicalM5ImportRunning = false;
-let historicalM5LastRun = null;
+// Track importer locks and retry windows per symbol. A single global lock
+// silently skipped every symbol after the first when the scheduler fanned out.
+const historicalM1ImportRunning = new Set();
+const historicalM1LastRun = new Map();
+const historicalM1RetryAfter = new Map();
+const historicalM5ImportRunning = new Set();
+const historicalM5LastRun = new Map();
 
 function utcDateString(date) { return date.toISOString().slice(0, 10); }
 function addUtcDays(dateString, days) {
@@ -292,46 +294,52 @@ async function importHistoricalDaily(symbol) {
 }
 
 async function runHistoricalM1Import(symbol) {
-  if (historicalM1ImportRunning || Date.now() < historicalM1RetryAfter) return;
-  historicalM1ImportRunning = true;
+  if (historicalM1ImportRunning.has(symbol) || Date.now() < (historicalM1RetryAfter.get(symbol) || 0)) return;
+  historicalM1ImportRunning.add(symbol);
   try {
     const result = await importDukascopyM1Chunk(db, symbol);
     const retryDelayMs = getM1ImportRetryDelayMs(result);
-    historicalM1RetryAfter = retryDelayMs ? Date.now() + retryDelayMs : 0;
-    historicalM1LastRun = {
+    const retryAt = retryDelayMs ? Date.now() + retryDelayMs : 0;
+    if (retryAt) historicalM1RetryAfter.set(symbol, retryAt);
+    else historicalM1RetryAfter.delete(symbol);
+    const run = {
       ...result,
-      retry_after: retryDelayMs ? new Date(historicalM1RetryAfter).toISOString() : null,
+      retry_after: retryAt ? new Date(retryAt).toISOString() : null,
       completed_at: new Date().toISOString()
     };
-    console.log("Dukascopy M1 import cycle", JSON.stringify(historicalM1LastRun));
+    historicalM1LastRun.set(symbol, run);
+    console.log("Dukascopy M1 import cycle", JSON.stringify(run));
   } catch (error) {
-    historicalM1LastRun = {
-      status: "error",
+    const run = {
+      status: "error", symbol,
       message: error instanceof Error ? error.message : String(error),
       completed_at: new Date().toISOString()
     };
-    console.error("Dukascopy M1 import failed", historicalM1LastRun.message);
+    historicalM1LastRun.set(symbol, run);
+    console.error("Dukascopy M1 import failed", run.message);
   } finally {
-    historicalM1ImportRunning = false;
+    historicalM1ImportRunning.delete(symbol);
   }
 }
 
 async function runHistoricalM5Import(symbol) {
-  if (historicalM5ImportRunning) return;
-  historicalM5ImportRunning = true;
+  if (historicalM5ImportRunning.has(symbol)) return;
+  historicalM5ImportRunning.add(symbol);
   try {
     const result = await importDukascopyM5Chunk(db, symbol);
-    historicalM5LastRun = { ...result, completed_at: new Date().toISOString() };
-    console.log("Dukascopy M5 import cycle", JSON.stringify(historicalM5LastRun));
+    const run = { ...result, symbol, completed_at: new Date().toISOString() };
+    historicalM5LastRun.set(symbol, run);
+    console.log("Dukascopy M5 import cycle", JSON.stringify(run));
   } catch (error) {
-    historicalM5LastRun = {
-      status: "error",
+    const run = {
+      status: "error", symbol,
       message: error instanceof Error ? error.message : String(error),
       completed_at: new Date().toISOString()
     };
-    console.error("Dukascopy M5 import failed", historicalM5LastRun.message);
+    historicalM5LastRun.set(symbol, run);
+    console.error("Dukascopy M5 import failed", run.message);
   } finally {
-    historicalM5ImportRunning = false;
+    historicalM5ImportRunning.delete(symbol);
   }
 }
 
@@ -1529,8 +1537,8 @@ const server = http.createServer(async (req, res) => {
         source: "Dukascopy historical Bid/Ask candles",
         first_candle_at: earliest[0]?.candle_at || null,
         last_candle: latest[0] || null,
-        backfill_running: historicalM1ImportRunning,
-        last_import: historicalM1LastRun,
+        backfill_running: historicalM1ImportRunning.has(symbol),
+        last_import: historicalM1LastRun.get(symbol) || null,
         note: "Historique séparé du flux Live-Rates. Pas encore utilisé pour les décisions de trading."
       });
     }
@@ -1657,8 +1665,8 @@ const server = http.createServer(async (req, res) => {
       ]);
       return send(res, 200, {
         symbol,
-        M1: { first: m1[0]?.candle_at || null, last: m1Last[0]?.candle_at || null, importing: historicalM1ImportRunning, last_import: historicalM1LastRun },
-        M5: { first: m5[0]?.candle_at || null, last: m5Last[0]?.candle_at || null, importing: historicalM5ImportRunning, last_import: historicalM5LastRun }
+        M1: { first: m1[0]?.candle_at || null, last: m1Last[0]?.candle_at || null, importing: historicalM1ImportRunning.has(symbol), last_import: historicalM1LastRun.get(symbol) || null },
+        M5: { first: m5[0]?.candle_at || null, last: m5Last[0]?.candle_at || null, importing: historicalM5ImportRunning.has(symbol), last_import: historicalM5LastRun.get(symbol) || null }
       });
     }
     if (url.pathname === "/api/scalping-comparison") {
