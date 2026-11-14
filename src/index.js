@@ -1537,8 +1537,8 @@ const server = http.createServer(async (req, res) => {
         source: "Dukascopy historical Bid/Ask candles",
         first_candle_at: earliest[0]?.candle_at || null,
         last_candle: latest[0] || null,
-        backfill_running: historicalM1ImportRunning,
-        last_import: historicalM1LastRun,
+        backfill_running: historicalM1ImportRunning.has(symbol),
+        last_import: historicalM1LastRun.get(symbol) || null,
         note: "Historique séparé du flux Live-Rates. Pas encore utilisé pour les décisions de trading."
       });
     }
@@ -1665,8 +1665,8 @@ const server = http.createServer(async (req, res) => {
       ]);
       return send(res, 200, {
         symbol,
-        M1: { first: m1[0]?.candle_at || null, last: m1Last[0]?.candle_at || null, importing: historicalM1ImportRunning, last_import: historicalM1LastRun },
-        M5: { first: m5[0]?.candle_at || null, last: m5Last[0]?.candle_at || null, importing: historicalM5ImportRunning, last_import: historicalM5LastRun }
+        M1: { first: m1[0]?.candle_at || null, last: m1Last[0]?.candle_at || null, importing: historicalM1ImportRunning.has(symbol), last_import: historicalM1LastRun.get(symbol) || null },
+        M5: { first: m5[0]?.candle_at || null, last: m5Last[0]?.candle_at || null, importing: historicalM5ImportRunning.has(symbol), last_import: historicalM5LastRun.get(symbol) || null }
       });
     }
     if (url.pathname === "/api/scalping-comparison") {
