@@ -3,14 +3,50 @@ import { planHistoryBackfillChunk, advanceHistoryBackfill, shouldRunIncrementalA
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Public Dukascopy instrument IDs. Override or extend these through
+// DUKASCOPY_INSTRUMENT_MAP (JSON) when a provider uses a different alias.
+const DEFAULT_DUKASCOPY_INSTRUMENTS = Object.freeze({
+  XAUUSD: "xauusd",
+  US30: "usa30idxusd",
+  NAS100: "usatechidxusd",
+  SP500: "usa500idxusd",
+  GER40: "deuidxeur",
+  JP225: "jpnidxjpy"
+});
+
+export function resolveDukascopyInstrument(symbol) {
+  const normalized = String(symbol || "").trim().toUpperCase();
+  if (!normalized) throw new Error("A market symbol is required for Dukascopy history import.");
+
+  let overrides = {};
+  const rawOverrides = process.env.DUKASCOPY_INSTRUMENT_MAP;
+  if (rawOverrides) {
+    try {
+      overrides = JSON.parse(rawOverrides);
+    } catch {
+      throw new Error("DUKASCOPY_INSTRUMENT_MAP must be valid JSON.");
+    }
+    if (!overrides || Array.isArray(overrides) || typeof overrides !== "object") {
+      throw new Error("DUKASCOPY_INSTRUMENT_MAP must be a JSON object.");
+    }
+  }
+
+  const configured = overrides[normalized] ?? overrides[normalized.toLowerCase()];
+  const instrument = configured ?? DEFAULT_DUKASCOPY_INSTRUMENTS[normalized] ?? normalized.toLowerCase();
+  if (typeof instrument !== "string" || !instrument.trim()) {
+    throw new Error("No valid Dukascopy instrument configured for " + normalized + ".");
+  }
+  return instrument.trim().toLowerCase();
+}
+
 function validCandle(c) {
   return c && Number.isFinite(Number(c.timestamp)) &&
     ["open", "high", "low", "close"].every(k => Number.isFinite(Number(c[k])) && Number(c[k]) > 0);
 }
 
-async function fetchSide(from, to, priceType, timeframe) {
+async function fetchSide(symbol, from, to, priceType, timeframe) {
   return getHistoricalRates({
-    instrument: "xauusd",
+    instrument: resolveDukascopyInstrument(symbol),
     dates: { from, to },
     timeframe: timeframe.toLowerCase(),
     priceType,
@@ -38,8 +74,8 @@ async function saveImportState(db, state) {
 
 async function importRows(db, symbol, timeframe, from, to) {
   const [bidRows, askRows] = await Promise.all([
-    fetchSide(from, to, "bid", timeframe),
-    fetchSide(from, to, "ask", timeframe)
+    fetchSide(symbol, from, to, "bid", timeframe),
+    fetchSide(symbol, from, to, "ask", timeframe)
   ]);
 
   const bids = new Map((Array.isArray(bidRows) ? bidRows : [])
