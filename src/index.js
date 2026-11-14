@@ -12,12 +12,18 @@ import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
 import { generateSelectedStrategySignal } from "./strategy-signal.js";
 import { getMarketFeedHealth, getM1ImportRetryDelayMs, shouldReconnectMarketFeed } from "./market-feed-health.js";
 
-const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
+const required = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
   if (!process.env[key]) {
     console.error("Missing required environment variable:", key);
     process.exit(1);
   }
+}
+
+const liveRatesApiKey = String(process.env.LIVE_RATES_API_KEY || "").trim();
+const liveRatesEnabled = liveRatesApiKey.length > 0;
+if (!liveRatesEnabled) {
+  console.warn("Live-Rates feed disabled: LIVE_RATES_API_KEY is not configured; Dukascopy historical imports remain available.");
 }
 
 const symbols = (process.env.SYMBOLS || "XAUUSD").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
@@ -228,7 +234,7 @@ async function getHistoricalContext(symbol) {
   return result;
 }
 async function importHistoricalDaily(symbol) {
-  if (!process.env.LIVE_RATES_API_KEY || historicalImportRunning) return;
+  if (!liveRatesEnabled || historicalImportRunning) return;
   historicalImportRunning = true;
   try {
     const existing = await db("aiva_historical_daily?symbol=eq." + encodeURIComponent(symbol) +
@@ -248,7 +254,7 @@ async function importHistoricalDaily(symbol) {
       endpoint.searchParams.set("symbols", "USD");
       endpoint.searchParams.set("start", cursor);
       endpoint.searchParams.set("end", chunkEnd);
-      endpoint.searchParams.set("key", process.env.LIVE_RATES_API_KEY);
+      endpoint.searchParams.set("key", liveRatesApiKey);
       let response;
       for (let attempt = 0; attempt < 8; attempt++) {
         response = await fetch(endpoint, { signal: AbortSignal.timeout(20000) });
@@ -1934,7 +1940,7 @@ socket.on("connect", () => {
   connected = true; lastConnectedAt = new Date().toISOString(); lastError = null;
   console.log("Socket connected", host, "symbols", symbols.join(","), "reconnect_count", reconnectCount);
   socket.emit("instruments", symbols.join(","));
-  socket.emit("key", process.env.LIVE_RATES_API_KEY);
+  socket.emit("key", liveRatesApiKey);
 });
 socket.on("disconnect", reason => { connected = false; console.warn("Socket disconnected", reason); });
 socket.on("connect_error", error => { connected = false; lastError = error.message; console.error("Socket error", error.message); });
@@ -1956,42 +1962,46 @@ process.on("SIGINT", () => stop("SIGINT"));
 const feedWatchdogIntervalMs = 30_000;
 const feedMaxAgeMs = 90_000;
 const feedReconnectCooldownMs = 60_000;
-setInterval(() => {
-  const now = Date.now();
-  if (!shouldReconnectMarketFeed({
-    connected,
-    socketActive: socket.active,
-    lastQuoteAt,
-    connectedAt: lastConnectedAt,
-    lastReconnectAt,
-    now,
-    maxAgeMs: feedMaxAgeMs,
-    cooldownMs: feedReconnectCooldownMs
-  })) return;
+if (liveRatesEnabled) {
+  setInterval(() => {
+    const now = Date.now();
+    if (!shouldReconnectMarketFeed({
+      connected,
+      socketActive: socket.active,
+      lastQuoteAt,
+      connectedAt: lastConnectedAt,
+      lastReconnectAt,
+      now,
+      maxAgeMs: feedMaxAgeMs,
+      cooldownMs: feedReconnectCooldownMs
+    })) return;
 
-  const wasStale = connected;
-  lastReconnectAt = now;
-  reconnectCount++;
-  lastError = wasStale ? "No fresh quote for more than 90 seconds; forcing socket reconnect"
-    : "Socket inactive; watchdog restarting connection";
-  console.warn("Live-Rates feed watchdog reconnect", JSON.stringify({
-    reason: wasStale ? "stale_quotes" : "socket_inactive",
-    reconnect_count: reconnectCount,
-    last_quote_at: lastQuoteAt,
-    quote_age_ms: lastQuoteAt ? now - Date.parse(lastQuoteAt) : null
-  }));
-  if (wasStale) {
-    connected = false;
-    socket.disconnect();
-  }
-  socket.connect();
-}, feedWatchdogIntervalMs).unref();
+    const wasStale = connected;
+    lastReconnectAt = now;
+    reconnectCount++;
+    lastError = wasStale ? "No fresh quote for more than 90 seconds; forcing socket reconnect"
+      : "Socket inactive; watchdog restarting connection";
+    console.warn("Live-Rates feed watchdog reconnect", JSON.stringify({
+      reason: wasStale ? "stale_quotes" : "socket_inactive",
+      reconnect_count: reconnectCount,
+      last_quote_at: lastQuoteAt,
+      quote_age_ms: lastQuoteAt ? now - Date.parse(lastQuoteAt) : null
+    }));
+    if (wasStale) {
+      connected = false;
+      socket.disconnect();
+    }
+    socket.connect();
+  }, feedWatchdogIntervalMs).unref();
 
-const feedConnectDelayMs = Math.max(5000, Math.min(30000, Number(process.env.LIVE_RATES_CONNECT_DELAY_MS || 15000)));
-setTimeout(() => {
-  console.log("Starting Live-Rates connection after deployment grace period", feedConnectDelayMs, "ms");
-  socket.connect();
-}, feedConnectDelayMs).unref();
+  const feedConnectDelayMs = Math.max(5000, Math.min(30000, Number(process.env.LIVE_RATES_CONNECT_DELAY_MS || 15000)));
+  setTimeout(() => {
+    console.log("Starting Live-Rates connection after deployment grace period", feedConnectDelayMs, "ms");
+    socket.connect();
+  }, feedConnectDelayMs).unref();
+} else {
+  console.log("Live-Rates watchdog disabled because no provider key is configured.");
+}
 
 let researchCycleRunning = false;
 async function runScheduledResearchCycle(symbol) {
