@@ -11,6 +11,7 @@ import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
 import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
 import { generateSelectedStrategySignal } from "./strategy-signal.js";
 import { getMarketFeedHealth, getM1ImportRetryDelayMs, shouldReconnectMarketFeed } from "./market-feed-health.js";
+import { isLiveRatesConfigured } from "./live-rates-config.js";
 
 const required = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -20,8 +21,8 @@ for (const key of required) {
   }
 }
 
-const liveRatesApiKey = String(process.env.LIVE_RATES_API_KEY || "").trim();
-const liveRatesEnabled = liveRatesApiKey.length > 0;
+const liveRatesEnabled = isLiveRatesConfigured();
+const liveRatesApiKey = liveRatesEnabled ? String(process.env.LIVE_RATES_API_KEY).trim() : "";
 if (!liveRatesEnabled) {
   console.warn("Live-Rates feed disabled: LIVE_RATES_API_KEY is not configured; Dukascopy historical imports remain available.");
 }
