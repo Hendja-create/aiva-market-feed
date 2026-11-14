@@ -24,12 +24,13 @@ function rsi(values, period) {
   }
   return out;
 }
-function atr(c, period = 14) {
-  const tr = c.map((x, i) => i === 0 ? x.bid_high - x.bid_low : Math.max(
-    x.bid_high - x.bid_low,
-    Math.abs(x.bid_high - c[i-1].bid_close),
-    Math.abs(x.bid_low - c[i-1].bid_close)
-  ));
+function atr(c, period = 14, intervalMs = 300000) {
+  const tr = c.map((x, i) => {
+    if (i === 0 || Date.parse(x.candle_at) - Date.parse(c[i-1].candle_at) !== intervalMs) return x.bid_high - x.bid_low;
+    return Math.max(x.bid_high - x.bid_low,
+      Math.abs(x.bid_high - c[i-1].bid_close),
+      Math.abs(x.bid_low - c[i-1].bid_close));
+  });
   const out = Array(c.length).fill(null);
   for (let i = period; i < c.length; i++) out[i] = mean(tr.slice(i-period+1, i+1));
   return out;
@@ -114,9 +115,10 @@ export async function runStrategyTournament(db, symbol="XAUUSD", timeframe="M5",
       "&candle_at=lte."+encodeURIComponent(end)+"&order=candle_at.desc&limit="+pageSize+"&offset="+offset);
     pages.push(...batch); if(batch.length<pageSize) break;
   }
-  const candles=pages.filter(x=>["bid_open","bid_high","bid_low","bid_close","ask_open","ask_high","ask_low","ask_close","spread_close"]
-    .every(k=>Number.isFinite(Number(x[k])))).sort((a,b)=>Date.parse(a.candle_at)-Date.parse(b.candle_at)).slice(-maxRows)
-    .map(x=>Object.fromEntries(Object.entries(x).map(([k,v])=>["candle_at", "candle_at"].includes(k)?[k,v]:[k,Number(v)])));
+  const validRows=pages.filter(isValidSimulationCandle);
+  const rejectedCandles=pages.length-validRows.length;
+  const candles=validRows.sort((a,b)=>Date.parse(a.candle_at)-Date.parse(b.candle_at)).slice(-maxRows)
+    .map(x=>Object.fromEntries(Object.entries(x).map(([k,v])=>k==="candle_at"?[k,v]:[k,Number(v)])));
   if(candles.length<5000) return {available:false,data_points:candles.length,required:5000,warning:"Historique insuffisant."};
   const closes=candles.map(x=>x.bid_close), e9=ema(closes,9), e20=ema(closes,20), e50=ema(closes,50);
   const r2=rsi(closes,2), r14=rsi(closes,14), a14=atr(candles,14,intervalMs);
@@ -140,6 +142,8 @@ export async function runStrategyTournament(db, symbol="XAUUSD", timeframe="M5",
     const trades=[]; let nextAllowed=cfg.minLookback;
     for(let i=cfg.minLookback;i<candles.length-7;i++) {
       if(i<nextAllowed) continue;
+      if (!isContinuousWindow(candles, i-cfg.lookback, i, intervalMs) ||
+          !isContinuousWindow(candles, i+1, i+6, intervalMs)) { gapRejectedSignals++; continue; }
       const direction=buildSignals(candles,closes,e9,e20,e50,r2,r14,a14,{...cfg,i});
       if(!direction) continue;
       const entryBar=candles[i+1], spread=entryBar.ask_open-entryBar.bid_open;
