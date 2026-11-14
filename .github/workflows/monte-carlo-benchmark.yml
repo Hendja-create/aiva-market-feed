@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - benchmark/monte-carlo-pr21
+  pull_request:
+    branches:
+      - feat/deterministic-monte-carlo-sensitivity
 
 permissions:
   contents: read
