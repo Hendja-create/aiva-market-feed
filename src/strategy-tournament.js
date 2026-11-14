@@ -137,7 +137,8 @@ export async function runStrategyTournament(db, symbol="XAUUSD", timeframe="M5",
     {family:"session_momentum",name:"Session momentum 07-20 UTC",lookback:20,minLookback:51,startHour:7,endHour:20,momentum:3,momentumAtr:0.8},
     {family:"session_momentum",name:"Session momentum 12-16 UTC",lookback:20,minLookback:51,startHour:12,endHour:16,momentum:3,momentumAtr:0.8}
   ];
-  const split=Math.floor(candles.length*0.7), results=[];\n  let gapRejectedSignals=0;
+  const split=Math.floor(candles.length*0.7), results=[];
+  let gapRejectedSignals=0;
   for(const cfg of configs) {
     const trades=[]; let nextAllowed=cfg.minLookback;
     for(let i=cfg.minLookback;i<candles.length-7;i++) {
