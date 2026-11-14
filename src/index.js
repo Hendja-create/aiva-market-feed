@@ -5,7 +5,6 @@ import { runM1ScalpingBacktest } from "./scalping-backtest.js";
 import { runVolatilityReversalBacktest } from "./volatility-reversal-backtest.js";
 import { runLiquiditySweepBacktest } from "./liquidity-sweep-backtest.js";
 import { runStrategyTournament } from "./strategy-tournament.js";
-import { runInverseKeltnerBacktest, runInverseKeltnerDemoCycle, getInverseKeltnerDemoStatus } from "./inverse-keltner-demo.js";
 import { buildQuoteSnapshot, calculateDemoPnl, getDemoExecutionCosts } from "./execution-accounting.js";
 import { runResearchCycle, getResearchStatus } from "./research-mode.js";
 import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
@@ -1771,35 +1770,6 @@ const server = http.createServer(async (req, res) => {
         interpretation: "Exploratory parameter sensitivity only. These windows are not independent if market regimes overlap conceptually; no parameter is promoted automatically."
       });
     }
-    if (url.pathname === "/api/inverse-keltner-backtest") {
-      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
-      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
-      const authHeader = String(req.headers.authorization || "");
-      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
-      const clientIp = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").split(",")[0].trim();
-      const rateKey = "inverse-keltner-backtest:" + clientIp;
-      const previousRequest = analysisRateLimit.get(rateKey) || 0;
-      const elapsed = Date.now() - previousRequest;
-      if (elapsed < 900000) return send(res, 429, { error: "backtest_rate_limited", retry_after_ms: 900000 - elapsed });
-      analysisRateLimit.set(rateKey, Date.now());
-      const result = await runInverseKeltnerBacktest(db, symbol, 80000);
-      if (!result.available) return send(res, 422, result);
-      const saved = await db("aiva_backtest_runs", {
-        method: "POST", headers: { Prefer: "return=representation" },
-        body: JSON.stringify({
-          symbol, method: "aiva_inverse_keltner_1_5_atr_v1",
-          data_points: result.data_points, first_tick_at: result.first_candle_at,
-          last_tick_at: result.last_candle_at, train_boundary_at: result.trades.find(t => t.sample === "out_of_sample")?.signal_time || null,
-          overall: result.overall, in_sample: result.in_sample, out_of_sample: result.out_of_sample,
-          assumptions: { ...result.assumptions, experiment_group: "inverse_keltner_demo_research_v1",
-            strategy: result.strategy, by_direction: result.by_direction },
-          warnings: result.warnings, trade_details: result.trades
-        })
-      });
-      result.run_id = saved?.[0]?.id || null;
-      return send(res, 200, result);
-    }
     if (url.pathname === "/api/strategy-agent-run" && req.method === "POST") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
@@ -1847,15 +1817,6 @@ const server = http.createServer(async (req, res) => {
       const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
       if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
       const result = await getResearchStatus(db, symbol);
-      return send(res, 200, result);
-    }
-    if (url.pathname === "/api/inverse-keltner-demo-status") {
-      const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
-      if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
-      const authHeader = String(req.headers.authorization || "");
-      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-      if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
-      const result = await getInverseKeltnerDemoStatus(db, symbol);
       return send(res, 200, result);
     }
     if (url.pathname === "/api/backtest-history") {
@@ -2076,65 +2037,10 @@ const volatilityReversalIntervalMs = Math.max(60 * 60 * 1000, Number(process.env
 setTimeout(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, 15000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, volatilityReversalIntervalMs);
 console.log("Experimental volatility reversal research scheduler enabled", volatilityReversalIntervalMs, "ms");
-let inverseKeltnerBacktestRunning = false;
-async function runScheduledInverseKeltnerBacktest(symbol) {
-  if (inverseKeltnerBacktestRunning) return;
-  inverseKeltnerBacktestRunning = true;
-  try {
-    const result = await runInverseKeltnerBacktest(db, symbol, 80000);
-    if (!result.available) {
-      console.log("Inverse Keltner backtest waiting for history", JSON.stringify(result));
-      return;
-    }
-    const saved = await db("aiva_backtest_runs", {
-      method: "POST", headers: { Prefer: "return=representation" },
-      body: JSON.stringify({
-        symbol, method: "aiva_inverse_keltner_1_5_atr_v1",
-        data_points: result.data_points, first_tick_at: result.first_candle_at,
-        last_tick_at: result.last_candle_at,
-        train_boundary_at: result.trades.find(t => t.sample === "out_of_sample")?.signal_time || null,
-        overall: result.overall, in_sample: result.in_sample, out_of_sample: result.out_of_sample,
-        assumptions: { ...result.assumptions, experiment_group: "inverse_keltner_demo_research_v1",
-          strategy: result.strategy, by_direction: result.by_direction },
-        warnings: result.warnings, trade_details: result.trades
-      })
-    });
-    console.log("Inverse Keltner backtest saved", JSON.stringify({
-      symbol, overall: result.overall, out_of_sample: result.out_of_sample,
-      by_direction: result.by_direction, run_id: saved?.[0]?.id || null
-    }));
-  } catch (error) {
-    console.error("Inverse Keltner backtest failed", error instanceof Error ? error.message : String(error));
-  } finally {
-    inverseKeltnerBacktestRunning = false;
-  }
-}
-
-let inverseKeltnerDemoRunning = false;
-async function runScheduledInverseKeltnerDemo(symbol) {
-  if (inverseKeltnerDemoRunning) return;
-  inverseKeltnerDemoRunning = true;
-  try {
-    const result = await runInverseKeltnerDemoCycle(db, symbol);
-    console.log("Inverse Keltner paper demo cycle", JSON.stringify({symbol,...result}));
-  } catch (error) {
-    console.error("Inverse Keltner paper demo error", error instanceof Error ? error.message : String(error));
-  } finally {
-    inverseKeltnerDemoRunning = false;
-  }
-}
 const strategyTournamentIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.STRATEGY_TOURNAMENT_INTERVAL_MS || 21600000));
 setTimeout(() => { for (const symbol of symbols) runScheduledStrategyTournament(symbol); }, 120000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledStrategyTournament(symbol); }, strategyTournamentIntervalMs);
 console.log("Independent strategy tournament scheduler enabled", strategyTournamentIntervalMs, "ms");
-const inverseKeltnerDemoIntervalMs = Math.max(15000, Number(process.env.INVERSE_KELTNER_DEMO_INTERVAL_MS || 30000));
-setTimeout(() => { for (const symbol of symbols) runScheduledInverseKeltnerDemo(symbol); }, 60000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledInverseKeltnerDemo(symbol); }, inverseKeltnerDemoIntervalMs);
-console.log("Inverse Keltner paper demo scheduler enabled", inverseKeltnerDemoIntervalMs, "ms; real orders disabled");
-const inverseKeltnerBacktestIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.INVERSE_KELTNER_BACKTEST_INTERVAL_MS || 21600000));
-setTimeout(() => { for (const symbol of symbols) runScheduledInverseKeltnerBacktest(symbol); }, 180000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledInverseKeltnerBacktest(symbol); }, inverseKeltnerBacktestIntervalMs);
-console.log("Inverse Keltner research backtest scheduler enabled", inverseKeltnerBacktestIntervalMs, "ms");
 const liquiditySweepIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.LIQUIDITY_SWEEP_INTERVAL_MS || 21600000));
 setTimeout(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, 45000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, liquiditySweepIntervalMs);
