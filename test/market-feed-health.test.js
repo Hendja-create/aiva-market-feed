@@ -10,7 +10,7 @@ test("connected socket without a recent quote is reported stale", () => {
   });
   assert.equal(health.socketConnected, true);
   assert.equal(health.fresh, false);
-  assert.equal(health.status, "STALE");
+  assert.equal(health.status, "stale");
   assert.equal(health.ageMs, 3_600_000);
 });
 
@@ -21,13 +21,13 @@ test("a recent quote is reported connected and fresh", () => {
     now: Date.parse("2026-11-13T22:45:00.000Z")
   });
   assert.equal(health.fresh, true);
-  assert.equal(health.status, "CONNECTED");
+  assert.equal(health.status, "fresh");
 });
 
 test("missing quote is not fresh even when socket is connected", () => {
   const health = getMarketFeedHealth({ connected: true, lastQuoteAt: null });
   assert.equal(health.fresh, false);
-  assert.equal(health.status, "STALE");
+  assert.equal(health.status, "stale");
 });
 
 test("feed watchdog reconnects after stale quotes", () => {
@@ -47,6 +47,16 @@ test("feed watchdog waits during cooldown and active reconnection", () => {
   }), false);
   assert.equal(shouldReconnectMarketFeed({
     connected: false, socketActive: true, now
+  }), false);
+});
+
+test("feed watchdog gives a newly reconnected socket a fresh grace period", () => {
+  const now = Date.parse("2026-11-14T10:00:00.000Z");
+  assert.equal(shouldReconnectMarketFeed({
+    connected: true, socketActive: true,
+    lastQuoteAt: "2026-11-14T09:55:00.000Z",
+    connectedAt: "2026-11-14T09:59:30.000Z",
+    now
   }), false);
 });
 
