@@ -8,84 +8,124 @@ window.aivaRunBenchmark = async function () {
     return;
   }
   button.disabled = true;
-  out.textContent = "Étape 1/2 : connexion au projet de test…";
+  out.textContent = "Connexion au projet de test…";
   var token = "";
-  var levels = [1, 2, 4, 8, 16, 32];
+  var levels = [8, 16, 32];
   var results = [];
-  var total = 1800;
+  var total = levels.length * 3 * 100;
   var finished = 0;
+  var timeoutMs = 10000;
+
   function percentile(values, p) {
-    if (!values.length) return 0;
-    values.sort(function (a, b) { return a - b; });
-    return values[Math.min(values.length - 1, Math.ceil(p * values.length) - 1)];
+    if (!values.length) return null;
+    var sorted = values.slice().sort(function (a, b) { return a - b; });
+    return sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)];
   }
-  function wait(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+  function metric(values, p) {
+    var value = percentile(values, p);
+    return value === null ? null : +value.toFixed(1);
+  }
+  function wait(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
   try {
-    var cfgResponse = await fetch("/test/config", { cache: "no-store" });
+    var cfgResponse = await fetch("/test/config", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs)
+    });
     if (!cfgResponse.ok) throw new Error("Impossible de lire la configuration du test.");
     var cfg = await cfgResponse.json();
     if (!cfg.configured) throw new Error("Configuration Supabase incomplète.");
+
     var loginResponse = await fetch(cfg.supabaseUrl + "/auth/v1/token?grant_type=password", {
       method: "POST",
       headers: { apikey: cfg.publishableKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ email: email, password: password })
+      body: JSON.stringify({ email: email, password: password }),
+      signal: AbortSignal.timeout(timeoutMs)
     });
     document.getElementById("password").value = "";
     if (!loginResponse.ok) throw new Error("Connexion refusée. Vérifie le compte de test du projet aiva-staging.");
     var loginData = await loginResponse.json();
     token = loginData.access_token;
     if (!token) throw new Error("Supabase n’a pas retourné de jeton de session.");
+
     for (var repetition = 1; repetition <= 3; repetition++) {
       for (var li = 0; li < levels.length; li++) {
         var concurrency = levels[li];
-        var durations = [], authDurations = [], dbDurations = [], errors = 0;
+        var durations = [];
+        var authDurations = [];
+        var dbDurations = [];
+        var errors = 0;
+        var timeouts = 0;
+        var statusCounts = {};
         var started = performance.now();
-        var completed = 0;
-        while (completed < 100) {
-          var count = Math.min(concurrency, 100 - completed);
-          var jobs = [];
-          for (var j = 0; j < count; j++) {
-            jobs.push((async function () {
-              var t = performance.now();
-              try {
-                var response = await fetch("/test/db-read", {
-                  headers: { Authorization: "Bearer " + token },
-                  cache: "no-store"
-                });
-                var body = await response.json();
-                return { ok: response.ok && body.ok, ms: performance.now() - t, authMs: body.authDurationMs, dbMs: body.dbDurationMs };
-              } catch (error) {
-                return { ok: false, ms: performance.now() - t };
+        var nextIndex = 0;
+
+        async function worker() {
+          while (true) {
+            var index = nextIndex++;
+            if (index >= 100) return;
+            var requestStarted = performance.now();
+            try {
+              var response = await fetch("/test/db-read", {
+                headers: { Authorization: "Bearer " + token },
+                cache: "no-store",
+                signal: AbortSignal.timeout(timeoutMs)
+              });
+              var body = await response.json();
+              var elapsed = performance.now() - requestStarted;
+              durations.push(elapsed);
+              statusCounts[response.status] = (statusCounts[response.status] || 0) + 1;
+              if (!response.ok || !body.ok) {
+                errors++;
+              } else {
+                if (typeof body.authDurationMs === "number") authDurations.push(body.authDurationMs);
+                if (typeof body.dbDurationMs === "number") dbDurations.push(body.dbDurationMs);
               }
-            })());
+            } catch (error) {
+              durations.push(performance.now() - requestStarted);
+              errors++;
+              if (error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+                timeouts++;
+                statusCounts.timeout = (statusCounts.timeout || 0) + 1;
+              } else {
+                statusCounts.network_error = (statusCounts.network_error || 0) + 1;
+              }
+            } finally {
+              finished++;
+              out.textContent = "Benchmark renforcé : répétition " + repetition + "/3, concurrence " +
+                concurrency + ", " + finished + "/" + total + " lectures terminées.";
+            }
           }
-          var batch = await Promise.all(jobs);
-          for (var k = 0; k < batch.length; k++) {
-            var item = batch[k];
-            durations.push(item.ms);
-            if (!item.ok) errors++;
-            if (typeof item.authMs === "number") authDurations.push(item.authMs);
-            if (typeof item.dbMs === "number") dbDurations.push(item.dbMs);
-          }
-          completed += count;
-          finished += count;
-          out.textContent = "Benchmark en cours : répétition " + repetition + "/3, concurrence " + concurrency + ", " + finished + "/" + total + " lectures terminées.";
         }
-        var elapsed = performance.now() - started;
+
+        var workers = [];
+        for (var w = 0; w < concurrency; w++) workers.push(worker());
+        await Promise.all(workers);
+        var elapsedMs = performance.now() - started;
         results.push({
-          repetition: repetition, concurrency: concurrency, requests: 100, errors: errors,
-          p50_ms: +percentile(durations, 0.50).toFixed(1),
-          p95_ms: +percentile(durations, 0.95).toFixed(1),
-          p99_ms: +percentile(durations, 0.99).toFixed(1),
-          auth_p50_ms: +percentile(authDurations, 0.50).toFixed(1),
-          db_p50_ms: +percentile(dbDurations, 0.50).toFixed(1),
-          throughput_rps: +(100 / (elapsed / 1000)).toFixed(2)
+          repetition: repetition,
+          concurrency: concurrency,
+          requests: 100,
+          errors: errors,
+          timeouts: timeouts,
+          p50_ms: metric(durations, 0.50),
+          p95_ms: metric(durations, 0.95),
+          p99_ms: metric(durations, 0.99),
+          auth_p50_ms: metric(authDurations, 0.50),
+          db_p50_ms: metric(dbDurations, 0.50),
+          throughput_rps: +(100 / (elapsedMs / 1000)).toFixed(2),
+          status_counts: statusCounts
         });
-        out.textContent = "Benchmark en cours : " + finished + "/" + total + " lectures.\n" + JSON.stringify(results, null, 2);
-        await wait(1500);
+        out.textContent = "Benchmark en cours : " + finished + "/" + total +
+          " lectures.\n" + JSON.stringify(results, null, 2);
+        await wait(1000);
       }
     }
-    out.textContent = "Benchmark terminé : " + finished + "/" + total + " lectures.\n" + JSON.stringify(results, null, 2);
+    out.textContent = "Benchmark renforcé terminé : " + finished + "/" + total +
+      " lectures. Timeout par requête : " + (timeoutMs / 1000) +
+      " s.\n" + JSON.stringify(results, null, 2);
   } catch (error) {
     out.textContent = "Erreur : " + (error && error.message ? error.message : "échec inattendu");
   } finally {
