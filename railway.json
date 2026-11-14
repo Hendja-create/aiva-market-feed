@@ -1,5 +1,5 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
   "build": { "builder": "DOCKERFILE", "dockerfilePath": "Dockerfile" },
-  "deploy": { "startCommand": "node scripts/railway-worker-pool-benchmark.js", "restartPolicyType": "NEVER" }
+  "deploy": { "startCommand": "sh -c \"node --test test/monte-carlo.test.js test/monte-carlo-worker-pool.test.js && node scripts/railway-worker-pool-benchmark.js\"", "restartPolicyType": "NEVER" }
 }
