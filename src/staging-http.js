@@ -26,7 +26,7 @@ small{color:#65718a}
 <form id="login">
 <label for="email">E-mail du compte de test</label><input id="email" type="email" autocomplete="username" required>
 <label for="password">Mot de passe</label><input id="password" type="password" autocomplete="current-password" required>
-<button id="run" type="submit">Lancer le test HTTP</button>
+<button id="run" type="button">Lancer le test HTTP</button>
 </form>
 <p><small>Benchmark renforcé : 100 lectures par niveau, 3 répétitions, concurrence 1, 2, 4, 8, 16 et 32 (1 800 lectures au total). Lectures uniquement : aucun ordre, aucune insertion, aucune modification de données. Prévoir environ 8 à 10 minutes.</small></p>
 <pre id="result">En attente du lancement.</pre>
@@ -36,13 +36,15 @@ const form=document.getElementById('login'),button=document.getElementById('run'
 const percentile=(values,p)=>{const a=[...values].sort((x,y)=>x-y);return a[Math.min(a.length-1,Math.ceil(p*a.length)-1)]??0};
 const levels=[1,2,4,8,16,32],repetitions=3,requestsPerLevel=100;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-form.addEventListener('submit',async event=>{
- event.preventDefault();button.disabled=true;out.textContent='Connexion au projet de test…';
+button.addEventListener('click',async()=>{
+ const email=document.getElementById('email').value.trim(),password=document.getElementById('password').value;
+ if(!email||!password){out.textContent='Saisis l’e-mail et le mot de passe du compte de test.';return;}
+ button.disabled=true;out.textContent='Étape 1/2 : connexion au projet de test…';
  let token='';
  try{
   const cfg=await fetch('/test/config',{cache:'no-store'}).then(r=>r.json());
   if(!cfg.configured)throw new Error('Configuration Supabase incomplète.');
-  const login=await fetch(cfg.supabaseUrl+'/auth/v1/token?grant_type=password',{method:'POST',headers:{apikey:cfg.publishableKey,'Content-Type':'application/json'},body:JSON.stringify({email:document.getElementById('email').value,password:document.getElementById('password').value})});
+  const login=await fetch(cfg.supabaseUrl+'/auth/v1/token?grant_type=password',{method:'POST',headers:{apikey:cfg.publishableKey,'Content-Type':'application/json'},body:JSON.stringify({email,password})});
   document.getElementById('password').value='';
   if(!login.ok)throw new Error('Connexion refusée. Vérifie le compte de test du projet aiva-staging.');
   token=(await login.json()).access_token;
