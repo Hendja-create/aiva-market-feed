@@ -12,6 +12,7 @@ import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
 import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
 import { generateSelectedStrategySignal } from "./strategy-signal.js";
 import { getMarketFeedHealth, getM1ImportRetryDelayMs } from "./market-feed-health.js";
+import { runDeterministicMonteCarlo } from "./monte-carlo.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -429,42 +430,23 @@ async function getAnalysis(symbol) {
   const sigma = Math.sqrt(variance);
   const horizon = 30;
   const blockLength = 3;
-  const simulations = [];
-  let up = 0, down = 0, flat = 0, sumMove = 0, adverse = 0;
-  if (returns.length >= 2) {
-    for (let s = 0; s < 100; s++) {
-      let price = current, pathHigh = current, pathLow = current;
-      for (let step = 0; step < horizon;) {
-        const startIndex = Math.floor(Math.random() * returns.length);
-        for (let j = 0; j < blockLength && step < horizon; j++, step++) {
-          const sampled = returns[(startIndex + j) % returns.length];
-          price *= 1 + sampled;
-          pathHigh = Math.max(pathHigh, price);
-          pathLow = Math.min(pathLow, price);
-        }
-      }
-      const move = price - current;
-      const maxAdverseMove = move >= 0 ? current - pathLow : pathHigh - current;
-      const maxFavorableMove = move >= 0 ? pathHigh - current : current - pathLow;
-      sumMove += move;
-      if (move > spread) up++;
-      else if (move < -spread) down++;
-      else flat++;
-      if (maxAdverseMove > Math.max(spread * 8, current * sigma * Math.sqrt(horizon) * 2.5)) adverse++;
-      simulations.push({
-        id: s + 1,
-        terminal_price: Number(price.toFixed(3)),
-        move: Number(move.toFixed(3)),
-        max_adverse_move: Number(maxAdverseMove.toFixed(3)),
-        max_favorable_move: Number(maxFavorableMove.toFixed(3)),
-        outcome: move > spread ? "UP" : move < -spread ? "DOWN" : "FLAT"
-      });
-    }
-  }
-  const probabilityUp = up / 100;
-  const probabilityDown = down / 100;
-  const probabilityFlat = flat / 100;
-  const expectedMove = sumMove / 100;
+  const monteCarlo = runDeterministicMonteCarlo({
+    returns,
+    current,
+    spread,
+    sigma,
+    horizon,
+    blockLength,
+    seedMaterial: symbol + "|" + ticks[ticks.length - 1].received_at
+  });
+  const baselineSimulation = monteCarlo.sample_sizes?.find(item => item.simulations === 100) ||
+    { probability_up: 0, probability_down: 0, probability_flat: 0, expected_move: 0, adverse_path_rate: 0 };
+  const simulations = monteCarlo.scenarios || [];
+  const probabilityUp = baselineSimulation.probability_up;
+  const probabilityDown = baselineSimulation.probability_down;
+  const probabilityFlat = baselineSimulation.probability_flat;
+  const expectedMove = baselineSimulation.expected_move;
+  const adverse = baselineSimulation.adverse_path_rate * 100;
   const confidence = Math.max(probabilityUp, probabilityDown);
   const expectedRange = current * sigma * Math.sqrt(horizon);
   const spreadRatio = expectedRange > 0 ? spread / expectedRange : 1;
@@ -524,7 +506,7 @@ async function getAnalysis(symbol) {
     symbol, decision, simulations: 100, confidence: Number(confidence.toFixed(4)),
     probability_up: Number(probabilityUp.toFixed(4)), probability_down: Number(probabilityDown.toFixed(4)), probability_flat: Number(probabilityFlat.toFixed(4)),
     expected_move: Number(expectedMove.toFixed(4)), risk_score: Number(riskScore.toFixed(4)),
-    rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, block_length: blockLength, confidence_threshold: adaptiveConfidenceThreshold, recent_momentum_10: Number(recentMomentum.toFixed(8)), decision_diagnostics: decisionDiagnostics, historical_context: historicalContext, model: "block_bootstrap_monte_carlo_v2" },
+    rationale, features: { samples: prices.length, returns: returns.length, current_price: current, spread, mean_return: mean, volatility_per_tick: sigma, horizon_steps: horizon, block_length: blockLength, confidence_threshold: adaptiveConfidenceThreshold, recent_momentum_10: Number(recentMomentum.toFixed(8)), decision_diagnostics: decisionDiagnostics, historical_context: historicalContext, monte_carlo_sensitivity: monteCarlo.sample_sizes || [], monte_carlo_sensitivity_delta: monteCarlo.sensitivity_vs_baseline || null, monte_carlo_seed: monteCarlo.seed || null, model: "deterministic_block_bootstrap_monte_carlo_v3" },
     scenarios: simulations, generated_at: new Date().toISOString()
   };
   const saved = await db("market_analysis_runs", {
