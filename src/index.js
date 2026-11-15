@@ -1969,6 +1969,31 @@ async function saveQuote(q) {
   if (received === 1 || received % 20 === 0) console.log("Quote stored", symbol, "bid", bid, "ask", ask, "latency", row.latency_ms);
 }
 
+async function logLiveRatesIndexCatalog() {
+  try {
+    const endpoint = new URL("https://www.live-rates.com/api/rates");
+    endpoint.searchParams.set("key", process.env.LIVE_RATES_API_KEY);
+    const response = await fetch(endpoint, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error("catalog HTTP " + response.status);
+    const payload = await response.json();
+    const items = Array.isArray(payload) ? payload
+      : Array.isArray(payload?.rates) ? payload.rates
+      : Array.isArray(payload?.data) ? payload.data : [];
+    const pattern = /(US30|NAS100|SP500|GER40|JP225|DOW|NASDAQ|S.?P.?500|DAX|NIKKEI|USA30|USA500|USATECH|DEUIDX|JPNIDX)/i;
+    const matches = items.map(item => ({
+      currency: String(item?.currency || item?.symbol || item?.name || ""),
+      updated: item?.timestamp || item?.last_update || null
+    })).filter(item => pattern.test(item.currency));
+    console.log("Live-Rates index instrument catalog", JSON.stringify({
+      total_instruments: items.length, index_matches: matches
+    }));
+  } catch (error) {
+    console.warn("Live-Rates index catalog check failed",
+      error instanceof Error ? error.message : String(error));
+  }
+}
+setTimeout(() => { logLiveRatesIndexCatalog(); }, 8000).unref();
+
 const socket = io("https://" + host, { autoConnect: false, transports: ["websocket"], reconnection: true, reconnectionDelay: 1000, reconnectionDelayMax: 30000, timeout: 20000 });
 socket.on("connect", () => {
   connected = true; lastConnectedAt = new Date().toISOString(); lastError = null;
