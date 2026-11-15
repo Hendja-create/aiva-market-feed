@@ -22,6 +22,8 @@ for (const key of required) {
 }
 
 const symbols = (process.env.SYMBOLS || "XAUUSD").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+// Live quote subscriptions can be expanded without changing the strategy symbol set.
+const liveSymbols = [...new Set((process.env.LIVE_RATES_SYMBOLS || symbols.join(",")).split(",").map(s => s.trim().toUpperCase()).filter(Boolean))];
 // Historical M5 imports can run independently of the live quote subscription.
 const historicalM5Symbols = [...new Set((process.env.DUKASCOPY_M5_SYMBOLS || symbols.join(",")).split(",").map(s => s.trim().toUpperCase()).filter(Boolean))];
 const host = process.env.LIVE_RATES_SOCKET_HOST || "eu-wss.live-rates.com";
@@ -1939,7 +1941,7 @@ function num(value) {
 }
 async function saveQuote(q) {
   const symbol = String(q.currency || q.symbol || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
-  if (!symbols.includes(symbol)) return;
+  if (!liveSymbols.includes(symbol)) return;
   const bid = num(q.bid), ask = num(q.ask);
   if (!bid || !ask || bid <= 0 || ask < bid) { console.warn("Rejected invalid quote", symbol); return; }
   const rawTs = num(q.timestamp);
@@ -1967,11 +1969,36 @@ async function saveQuote(q) {
   if (received === 1 || received % 20 === 0) console.log("Quote stored", symbol, "bid", bid, "ask", ask, "latency", row.latency_ms);
 }
 
+async function logLiveRatesIndexCatalog() {
+  try {
+    const endpoint = new URL("https://www.live-rates.com/api/rates");
+    endpoint.searchParams.set("key", process.env.LIVE_RATES_API_KEY);
+    const response = await fetch(endpoint, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error("catalog HTTP " + response.status);
+    const payload = await response.json();
+    const items = Array.isArray(payload) ? payload
+      : Array.isArray(payload?.rates) ? payload.rates
+      : Array.isArray(payload?.data) ? payload.data : [];
+    const pattern = /(US30|NAS100|SP500|GER40|JP225|DOW|NASDAQ|S.?P.?500|DAX|NIKKEI|USA30|USA500|USATECH|DEUIDX|JPNIDX)/i;
+    const matches = items.map(item => ({
+      currency: String(item?.currency || item?.symbol || item?.name || ""),
+      updated: item?.timestamp || item?.last_update || null
+    })).filter(item => pattern.test(item.currency));
+    console.log("Live-Rates index instrument catalog", JSON.stringify({
+      total_instruments: items.length, index_matches: matches
+    }));
+  } catch (error) {
+    console.warn("Live-Rates index catalog check failed",
+      error instanceof Error ? error.message : String(error));
+  }
+}
+setTimeout(() => { logLiveRatesIndexCatalog(); }, 8000).unref();
+
 const socket = io("https://" + host, { autoConnect: false, transports: ["websocket"], reconnection: true, reconnectionDelay: 1000, reconnectionDelayMax: 30000, timeout: 20000 });
 socket.on("connect", () => {
   connected = true; lastConnectedAt = new Date().toISOString(); lastError = null;
-  console.log("Socket connected", host, "symbols", symbols.join(","), "reconnect_count", reconnectCount);
-  socket.emit("instruments", symbols.join(","));
+  console.log("Socket connected", host, "symbols", liveSymbols.join(","), "reconnect_count", reconnectCount);
+  socket.emit("instruments", liveSymbols.join(","));
   socket.emit("key", process.env.LIVE_RATES_API_KEY);
 });
 socket.on("disconnect", reason => { connected = false; console.warn("Socket disconnected", reason); });
@@ -2069,9 +2096,13 @@ setTimeout(() => { for (const symbol of symbols) runHistoricalM1Import(symbol); 
 setInterval(() => { for (const symbol of symbols) runHistoricalM1Import(symbol); }, historicalM1ImportIntervalMs);
 console.log("Dukascopy M1 history importer enabled", historicalM1ImportIntervalMs, "ms");
 const historicalM5ImportIntervalMs = Math.max(60000, Number(process.env.DUKASCOPY_M5_IMPORT_INTERVAL_MS || 120000));
-setTimeout(() => { for (const symbol of historicalM5Symbols) runHistoricalM5Import(symbol); }, 90000).unref();
-setInterval(() => { for (const symbol of historicalM5Symbols) runHistoricalM5Import(symbol); }, historicalM5ImportIntervalMs);
-console.log("Dukascopy M5 history importer enabled", historicalM5ImportIntervalMs, "ms");
+if (String(process.env.DUKASCOPY_M5_BACKFILL_ENABLED || "true").toLowerCase() === "true") {
+  setTimeout(() => { for (const symbol of historicalM5Symbols) runHistoricalM5Import(symbol); }, 90000).unref();
+  setInterval(() => { for (const symbol of historicalM5Symbols) runHistoricalM5Import(symbol); }, historicalM5ImportIntervalMs);
+  console.log("Dukascopy M5 history importer enabled", historicalM5ImportIntervalMs, "ms");
+} else {
+  console.log("Dukascopy M5 history importer paused by DUKASCOPY_M5_BACKFILL_ENABLED=false");
+}
 const scalpingBacktestIntervalMs = Math.max(30 * 60 * 1000, Number(process.env.SCALPING_BACKTEST_INTERVAL_MS || 21600000));
 setTimeout(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, 90 * 1000).unref();
 setInterval(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, scalpingBacktestIntervalMs);
