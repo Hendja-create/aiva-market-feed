@@ -22,6 +22,8 @@ for (const key of required) {
 }
 
 const symbols = (process.env.SYMBOLS || "XAUUSD").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+// Historical M5 imports can run independently of the live quote subscription.
+const historicalM5Symbols = [...new Set((process.env.DUKASCOPY_M5_SYMBOLS || symbols.join(",")).split(",").map(s => s.trim().toUpperCase()).filter(Boolean))];
 const host = process.env.LIVE_RATES_SOCKET_HOST || "eu-wss.live-rates.com";
 const baseUrl = process.env.SUPABASE_URL.replace(/\/$/, "");
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -2067,8 +2069,8 @@ setTimeout(() => { for (const symbol of symbols) runHistoricalM1Import(symbol); 
 setInterval(() => { for (const symbol of symbols) runHistoricalM1Import(symbol); }, historicalM1ImportIntervalMs);
 console.log("Dukascopy M1 history importer enabled", historicalM1ImportIntervalMs, "ms");
 const historicalM5ImportIntervalMs = Math.max(60000, Number(process.env.DUKASCOPY_M5_IMPORT_INTERVAL_MS || 120000));
-setTimeout(() => { for (const symbol of symbols) runHistoricalM5Import(symbol); }, 90000).unref();
-setInterval(() => { for (const symbol of symbols) runHistoricalM5Import(symbol); }, historicalM5ImportIntervalMs);
+setTimeout(() => { for (const symbol of historicalM5Symbols) runHistoricalM5Import(symbol); }, 90000).unref();
+setInterval(() => { for (const symbol of historicalM5Symbols) runHistoricalM5Import(symbol); }, historicalM5ImportIntervalMs);
 console.log("Dukascopy M5 history importer enabled", historicalM5ImportIntervalMs, "ms");
 const scalpingBacktestIntervalMs = Math.max(30 * 60 * 1000, Number(process.env.SCALPING_BACKTEST_INTERVAL_MS || 21600000));
 setTimeout(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, 90 * 1000).unref();
