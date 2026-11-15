@@ -1980,11 +1980,8 @@ async function logLiveRatesIndexCatalog() {
     const items = Array.isArray(payload) ? payload
       : Array.isArray(payload?.rates) ? payload.rates
       : Array.isArray(payload?.data) ? payload.data : [];
-    const pattern = /(US30|NAS100|SP500|GER40|JP225|DOW|NASDAQ|S.?P.?500|DAX|NIKKEI|USA30|USA500|USATECH|DEUIDX|JPNIDX)/i;
-    const matches = items.map(item => ({
-      currency: String(item?.currency || item?.symbol || item?.name || ""),
-      updated: item?.timestamp || item?.last_update || null
-    })).filter(item => pattern.test(item.currency));
+    const pattern = /(US30|NAS100|SP500|SPX500|GER40|DE40|DAX|JP225|JPX|NIKKEI|NI225|JPN|JAPAN|GERMANY|DEUTSCH|DOW|NASDAQ|S.?P.?500|USA30|USA500|USATECH|DEUIDX|JPNIDX)/i;
+    const matches = items.filter(item => pattern.test(JSON.stringify(item))).map(item => item);
     console.log("Live-Rates index instrument catalog", JSON.stringify({
       total_instruments: items.length, index_matches: matches
     }));
