@@ -1940,8 +1940,9 @@ function num(value) {
   const n = Number(value); return Number.isFinite(n) ? n : null;
 }
 async function saveQuote(q) {
-  const symbol = String(q.currency || q.symbol || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
-  if (!liveSymbols.includes(symbol)) return;
+  const providerSymbol = String(q.currency || q.symbol || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+  if (!liveSymbols.includes(providerSymbol)) return;
+  const symbol = ({ SPX500: "SP500" })[providerSymbol] || providerSymbol;
   const bid = num(q.bid), ask = num(q.ask);
   if (!bid || !ask || bid <= 0 || ask < bid) { console.warn("Rejected invalid quote", symbol); return; }
   const rawTs = num(q.timestamp);
