@@ -2074,19 +2074,32 @@ async function runScheduledResearchCycle(symbol) {
     researchCycleRunning = false;
   }
 }
-const researchCycleIntervalMs = Math.max(15000, Math.min(60000, Number(process.env.RESEARCH_MODE_INTERVAL_MS || 30000)));
-setTimeout(() => { for (const symbol of symbols) runScheduledResearchCycle(symbol); }, 75000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledResearchCycle(symbol); }, researchCycleIntervalMs);
-console.log("AIVA Research Mode paper-only scheduler enabled", researchCycleIntervalMs, "ms");
+const researchSchedulersEnabled = String(process.env.AIVA_RESEARCH_SCHEDULERS_ENABLED || "true").toLowerCase() === "true";
+if (researchSchedulersEnabled) {
+  const researchCycleIntervalMs = Math.max(15000, Math.min(60000, Number(process.env.RESEARCH_MODE_INTERVAL_MS || 30000)));
+  setTimeout(() => { for (const symbol of symbols) runScheduledResearchCycle(symbol); }, 75000).unref();
+  setInterval(() => { for (const symbol of symbols) runScheduledResearchCycle(symbol); }, researchCycleIntervalMs);
+  console.log("AIVA Research Mode paper-only scheduler enabled", researchCycleIntervalMs, "ms");
+  
+  
+} else {
+  console.log("Research Mode scheduler paused by AIVA_RESEARCH_SCHEDULERS_ENABLED=false");
+}
 
 const autonomousIntervalMs = Math.max(30000, Math.min(300000, Number(process.env.AUTO_ANALYSIS_INTERVAL_MS || 60000)));
 setTimeout(() => { runAutonomousCycle(); }, 20000);
 setInterval(runAutonomousCycle, autonomousIntervalMs);
 console.log("Autonomous analysis scheduler enabled", autonomousIntervalMs, "ms");
-const backtestIntervalMs = Math.max(3600000, Number(process.env.BACKTEST_INTERVAL_MS || 21600000));
-setTimeout(() => { for (const symbol of symbols) runScheduledBacktest(symbol); }, 90000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledBacktest(symbol); }, backtestIntervalMs);
-console.log("Scheduled historical backtest enabled", backtestIntervalMs, "ms");
+if (researchSchedulersEnabled) {
+  const backtestIntervalMs = Math.max(3600000, Number(process.env.BACKTEST_INTERVAL_MS || 21600000));
+  setTimeout(() => { for (const symbol of symbols) runScheduledBacktest(symbol); }, 90000).unref();
+  setInterval(() => { for (const symbol of symbols) runScheduledBacktest(symbol); }, backtestIntervalMs);
+  console.log("Scheduled historical backtest enabled", backtestIntervalMs, "ms");
+  
+} else {
+  console.log("Historical backtest scheduler paused by AIVA_RESEARCH_SCHEDULERS_ENABLED=false");
+}
+
 const historicalImportIntervalMs = 24 * 60 * 60 * 1000;
 setTimeout(() => { for (const symbol of symbols) importHistoricalDaily(symbol); }, 45000).unref();
 setInterval(() => { for (const symbol of symbols) importHistoricalDaily(symbol); }, historicalImportIntervalMs);
@@ -2103,74 +2116,91 @@ if (String(process.env.DUKASCOPY_M5_BACKFILL_ENABLED || "true").toLowerCase() ==
 } else {
   console.log("Dukascopy M5 history importer paused by DUKASCOPY_M5_BACKFILL_ENABLED=false");
 }
-const scalpingBacktestIntervalMs = Math.max(30 * 60 * 1000, Number(process.env.SCALPING_BACKTEST_INTERVAL_MS || 21600000));
-setTimeout(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, 90 * 1000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, scalpingBacktestIntervalMs);
-console.log("M1/M5 scalping comparison scheduler enabled", scalpingBacktestIntervalMs, "ms");
-const volatilityReversalIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.VOLATILITY_REVERSAL_INTERVAL_MS || 21600000));
-setTimeout(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, 15000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, volatilityReversalIntervalMs);
-console.log("Experimental volatility reversal research scheduler enabled", volatilityReversalIntervalMs, "ms");
-let inverseKeltnerBacktestRunning = false;
-async function runScheduledInverseKeltnerBacktest(symbol) {
-  if (inverseKeltnerBacktestRunning) return;
-  inverseKeltnerBacktestRunning = true;
-  try {
-    const result = await runInverseKeltnerBacktest(db, symbol, 80000);
-    if (!result.available) {
-      console.log("Inverse Keltner backtest waiting for history", JSON.stringify(result));
-      return;
+if (researchSchedulersEnabled) {
+  const scalpingBacktestIntervalMs = Math.max(30 * 60 * 1000, Number(process.env.SCALPING_BACKTEST_INTERVAL_MS || 21600000));
+  setTimeout(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, 90 * 1000).unref();
+  setInterval(() => { for (const symbol of symbols) runScheduledScalpingBacktest(symbol); }, scalpingBacktestIntervalMs);
+  console.log("M1/M5 scalping comparison scheduler enabled", scalpingBacktestIntervalMs, "ms");
+  const volatilityReversalIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.VOLATILITY_REVERSAL_INTERVAL_MS || 21600000));
+  setTimeout(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, 15000).unref();
+  setInterval(() => { for (const symbol of symbols) runScheduledVolatilityReversal(symbol); }, volatilityReversalIntervalMs);
+  console.log("Experimental volatility reversal research scheduler enabled", volatilityReversalIntervalMs, "ms");
+  let inverseKeltnerBacktestRunning = false;
+  async function runScheduledInverseKeltnerBacktest(symbol) {
+    if (inverseKeltnerBacktestRunning) return;
+    inverseKeltnerBacktestRunning = true;
+    try {
+      const result = await runInverseKeltnerBacktest(db, symbol, 80000);
+      if (!result.available) {
+        console.log("Inverse Keltner backtest waiting for history", JSON.stringify(result));
+        return;
+      }
+      const saved = await db("aiva_backtest_runs", {
+        method: "POST", headers: { Prefer: "return=representation" },
+        body: JSON.stringify({
+          symbol, method: "aiva_inverse_keltner_1_5_atr_v1",
+          data_points: result.data_points, first_tick_at: result.first_candle_at,
+          last_tick_at: result.last_candle_at,
+          train_boundary_at: result.trades.find(t => t.sample === "out_of_sample")?.signal_time || null,
+          overall: result.overall, in_sample: result.in_sample, out_of_sample: result.out_of_sample,
+          assumptions: { ...result.assumptions, experiment_group: "inverse_keltner_demo_research_v1",
+            strategy: result.strategy, by_direction: result.by_direction },
+          warnings: result.warnings, trade_details: result.trades
+        })
+      });
+      console.log("Inverse Keltner backtest saved", JSON.stringify({
+        symbol, overall: result.overall, out_of_sample: result.out_of_sample,
+        by_direction: result.by_direction, run_id: saved?.[0]?.id || null
+      }));
+    } catch (error) {
+      console.error("Inverse Keltner backtest failed", error instanceof Error ? error.message : String(error));
+    } finally {
+      inverseKeltnerBacktestRunning = false;
     }
-    const saved = await db("aiva_backtest_runs", {
-      method: "POST", headers: { Prefer: "return=representation" },
-      body: JSON.stringify({
-        symbol, method: "aiva_inverse_keltner_1_5_atr_v1",
-        data_points: result.data_points, first_tick_at: result.first_candle_at,
-        last_tick_at: result.last_candle_at,
-        train_boundary_at: result.trades.find(t => t.sample === "out_of_sample")?.signal_time || null,
-        overall: result.overall, in_sample: result.in_sample, out_of_sample: result.out_of_sample,
-        assumptions: { ...result.assumptions, experiment_group: "inverse_keltner_demo_research_v1",
-          strategy: result.strategy, by_direction: result.by_direction },
-        warnings: result.warnings, trade_details: result.trades
-      })
-    });
-    console.log("Inverse Keltner backtest saved", JSON.stringify({
-      symbol, overall: result.overall, out_of_sample: result.out_of_sample,
-      by_direction: result.by_direction, run_id: saved?.[0]?.id || null
-    }));
-  } catch (error) {
-    console.error("Inverse Keltner backtest failed", error instanceof Error ? error.message : String(error));
-  } finally {
-    inverseKeltnerBacktestRunning = false;
   }
+  
+  let inverseKeltnerDemoRunning = false;
+  async function runScheduledInverseKeltnerDemo(symbol) {
+    if (inverseKeltnerDemoRunning) return;
+    inverseKeltnerDemoRunning = true;
+    try {
+      const result = await runInverseKeltnerDemoCycle(db, symbol);
+      console.log("Inverse Keltner paper demo cycle", JSON.stringify({symbol,...result}));
+    } catch (error) {
+      console.error("Inverse Keltner paper demo error", error instanceof Error ? error.message : String(error));
+    } finally {
+      inverseKeltnerDemoRunning = false;
+    }
+  }
+  const strategyTournamentIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.STRATEGY_TOURNAMENT_INTERVAL_MS || 21600000));
+  setTimeout(() => { for (const symbol of symbols) runScheduledStrategyTournament(symbol); }, 120000).unref();
+  setInterval(() => { for (const symbol of symbols) runScheduledStrategyTournament(symbol); }, strategyTournamentIntervalMs);
+  console.log("Independent strategy tournament scheduler enabled", strategyTournamentIntervalMs, "ms");
+  const inverseKeltnerDemoIntervalMs = Math.max(15000, Number(process.env.INVERSE_KELTNER_DEMO_INTERVAL_MS || 30000));
+  setTimeout(() => { for (const symbol of symbols) runScheduledInverseKeltnerDemo(symbol); }, 60000).unref();
+  setInterval(() => { for (const symbol of symbols) runScheduledInverseKeltnerDemo(symbol); }, inverseKeltnerDemoIntervalMs);
+  console.log("Inverse Keltner paper demo scheduler enabled", inverseKeltnerDemoIntervalMs, "ms; real orders disabled");
+  
+} else {
+  console.log("Strategy research/backtest schedulers paused by AIVA_RESEARCH_SCHEDULERS_ENABLED=false");
 }
 
-let inverseKeltnerDemoRunning = false;
-async function runScheduledInverseKeltnerDemo(symbol) {
-  if (inverseKeltnerDemoRunning) return;
-  inverseKeltnerDemoRunning = true;
-  try {
-    const result = await runInverseKeltnerDemoCycle(db, symbol);
-    console.log("Inverse Keltner paper demo cycle", JSON.stringify({symbol,...result}));
-  } catch (error) {
-    console.error("Inverse Keltner paper demo error", error instanceof Error ? error.message : String(error));
-  } finally {
-    inverseKeltnerDemoRunning = false;
-  }
+if (researchSchedulersEnabled) {
+  const inverseKeltnerBacktestIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.INVERSE_KELTNER_BACKTEST_INTERVAL_MS || 21600000));
+  setTimeout(() => { for (const symbol of symbols) runScheduledInverseKeltnerBacktest(symbol); }, 180000).unref();
+  setInterval(() => { for (const symbol of symbols) runScheduledInverseKeltnerBacktest(symbol); }, inverseKeltnerBacktestIntervalMs);
+  console.log("Inverse Keltner research backtest scheduler enabled", inverseKeltnerBacktestIntervalMs, "ms");
+  
+} else {
+  console.log("Inverse Keltner backtest scheduler paused by AIVA_RESEARCH_SCHEDULERS_ENABLED=false");
 }
-const strategyTournamentIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.STRATEGY_TOURNAMENT_INTERVAL_MS || 21600000));
-setTimeout(() => { for (const symbol of symbols) runScheduledStrategyTournament(symbol); }, 120000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledStrategyTournament(symbol); }, strategyTournamentIntervalMs);
-console.log("Independent strategy tournament scheduler enabled", strategyTournamentIntervalMs, "ms");
-const inverseKeltnerDemoIntervalMs = Math.max(15000, Number(process.env.INVERSE_KELTNER_DEMO_INTERVAL_MS || 30000));
-setTimeout(() => { for (const symbol of symbols) runScheduledInverseKeltnerDemo(symbol); }, 60000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledInverseKeltnerDemo(symbol); }, inverseKeltnerDemoIntervalMs);
-console.log("Inverse Keltner paper demo scheduler enabled", inverseKeltnerDemoIntervalMs, "ms; real orders disabled");
-const inverseKeltnerBacktestIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.INVERSE_KELTNER_BACKTEST_INTERVAL_MS || 21600000));
-setTimeout(() => { for (const symbol of symbols) runScheduledInverseKeltnerBacktest(symbol); }, 180000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledInverseKeltnerBacktest(symbol); }, inverseKeltnerBacktestIntervalMs);
-console.log("Inverse Keltner research backtest scheduler enabled", inverseKeltnerBacktestIntervalMs, "ms");
-const liquiditySweepIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.LIQUIDITY_SWEEP_INTERVAL_MS || 21600000));
-setTimeout(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, 45000).unref();
-setInterval(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, liquiditySweepIntervalMs);
-console.log("Experimental liquidity sweep research scheduler enabled", liquiditySweepIntervalMs, "ms");
+
+if (researchSchedulersEnabled) {
+  const liquiditySweepIntervalMs = Math.max(60 * 60 * 1000, Number(process.env.LIQUIDITY_SWEEP_INTERVAL_MS || 21600000));
+  setTimeout(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, 45000).unref();
+  setInterval(() => { for (const symbol of symbols) runScheduledLiquiditySweep(symbol); }, liquiditySweepIntervalMs);
+  console.log("Experimental liquidity sweep research scheduler enabled", liquiditySweepIntervalMs, "ms");
+} else {
+  console.log("Liquidity sweep backtest scheduler paused by AIVA_RESEARCH_SCHEDULERS_ENABLED=false");
+}
+
