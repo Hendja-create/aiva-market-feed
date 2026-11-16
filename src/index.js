@@ -49,6 +49,30 @@ async function loadAdaptiveState(symbol) {
 }
 
 
+
+const apiResponseCache = new Map();
+async function cachedApiResponse(key, ttlMs, loader) {
+  const now = Date.now();
+  const cached = apiResponseCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cached.promise || cached.value;
+  }
+  const promise = Promise.resolve().then(loader).then(value => {
+    apiResponseCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+    return value;
+  }).catch(error => {
+    apiResponseCache.delete(key);
+    throw error;
+  });
+  apiResponseCache.set(key, { promise, expiresAt: now + ttlMs });
+  if (apiResponseCache.size > 500) {
+    for (const [cacheKey, entry] of apiResponseCache) {
+      if (entry.expiresAt <= now) apiResponseCache.delete(cacheKey);
+    }
+  }
+  return promise;
+}
+
 async function db(path, options = {}) {
   const response = await fetch(baseUrl + "/rest/v1/" + path, {
     ...options,
@@ -1576,51 +1600,56 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/autonomous-status") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
-      const [rows, recentAnalyses] = await Promise.all([
-        db("aiva_learning_state?symbol=eq." + encodeURIComponent(symbol) +
-          "&select=symbol,confidence_threshold,evaluated_directional,directional_accuracy,updated_at,last_cycle_at,last_decision&limit=1"),
-        db("market_analysis_runs?symbol=eq." + encodeURIComponent(symbol) +
-          "&select=id,decision,confidence,probability_up,probability_down,expected_move,risk_score,rationale,features,created_at&order=created_at.desc&limit=30")
-      ]);
-      const latestAnalysis = recentAnalyses[0] || null;
-      const blockerCounts = {};
-      for (const run of recentAnalyses.filter(item => item.decision === "NO_TRADE")) {
-        for (const reason of run.features?.decision_diagnostics?.blocking_reasons || []) {
-          blockerCounts[reason] = (blockerCounts[reason] || 0) + 1;
+      const status = await cachedApiResponse("autonomous-status:" + symbol, 10000, async () => {
+        const [rows, recentAnalyses] = await Promise.all([
+          db("aiva_learning_state?symbol=eq." + encodeURIComponent(symbol) +
+            "&select=symbol,confidence_threshold,evaluated_directional,directional_accuracy,updated_at,last_cycle_at,last_decision&limit=1"),
+          db("market_analysis_runs?symbol=eq." + encodeURIComponent(symbol) +
+            "&select=id,decision,confidence,probability_up,probability_down,expected_move,risk_score,rationale,features,created_at&order=created_at.desc&limit=30")
+        ]);
+        const latestAnalysis = recentAnalyses[0] || null;
+        const blockerCounts = {};
+        for (const run of recentAnalyses.filter(item => item.decision === "NO_TRADE")) {
+          for (const reason of run.features?.decision_diagnostics?.blocking_reasons || []) {
+            blockerCounts[reason] = (blockerCounts[reason] || 0) + 1;
+          }
         }
-      }
-      const state = rows[0] || {
-        symbol,
-        confidence_threshold: adaptiveConfidenceThreshold,
-        evaluated_directional: 0,
-        directional_accuracy: null,
-        last_cycle_at: null,
-        last_decision: null
-      };
-      return send(res, 200, {
-        ...state,
-        latest_analysis: latestAnalysis ? {
-          id: latestAnalysis.id,
-          decision: latestAnalysis.decision,
-          confidence: latestAnalysis.confidence,
-          probability_up: latestAnalysis.probability_up,
-          probability_down: latestAnalysis.probability_down,
-          expected_move: latestAnalysis.expected_move,          risk_score: latestAnalysis.risk_score,
-          rationale: latestAnalysis.rationale,
-          diagnostics: latestAnalysis.features?.decision_diagnostics || null,
-          created_at: latestAnalysis.created_at
-        } : null,
-        recent_no_trade_count: recentAnalyses.filter(item => item.decision === "NO_TRADE").length,
-        recent_analysis_count: recentAnalyses.length,
-        blocker_counts: blockerCounts
+        const state = rows[0] || {
+          symbol,
+          confidence_threshold: adaptiveConfidenceThreshold,
+          evaluated_directional: 0,
+          directional_accuracy: null,
+          last_cycle_at: null,
+          last_decision: null
+        };
+        return send(res, 200, {
+          ...state,
+          latest_analysis: latestAnalysis ? {
+            id: latestAnalysis.id,
+            decision: latestAnalysis.decision,
+            confidence: latestAnalysis.confidence,
+            probability_up: latestAnalysis.probability_up,
+            probability_down: latestAnalysis.probability_down,
+            expected_move: latestAnalysis.expected_move,          risk_score: latestAnalysis.risk_score,
+            rationale: latestAnalysis.rationale,
+            diagnostics: latestAnalysis.features?.decision_diagnostics || null,
+            created_at: latestAnalysis.created_at
+          } : null,
+          recent_no_trade_count: recentAnalyses.filter(item => item.decision === "NO_TRADE").length,
+          recent_analysis_count: recentAnalyses.length,
+          blocker_counts: blockerCounts
+        });
       });
+      return send(res, 200, status);
+
     }
     if (url.pathname === "/api/demo-history") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       const period = (url.searchParams.get("period") || "daily").toLowerCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
       if (!["daily", "weekly", "monthly"].includes(period)) return send(res, 400, { error: "invalid_period" });
-      return send(res, 200, await getDemoHistory(period, symbol));
+      const history = await cachedApiResponse("demo-history:" + symbol + ":" + period, 20000, () => getDemoHistory(period, symbol));
+      return send(res, 200, history);
     }
     if (url.pathname === "/api/demo-status") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
@@ -1631,8 +1660,11 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/quote") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
-      const rows = await db("market_quotes?symbol=eq." + encodeURIComponent(symbol) + "&select=symbol,bid,ask,mid,spread,provider_timestamp,received_at,source,connection_status,latency_ms&limit=1");
-      return send(res, 200, rows[0] || { error: "quote_not_found" });
+      const quote = await cachedApiResponse("quote:" + symbol, 1000, async () => {
+        const rows = await db("market_quotes?symbol=eq." + encodeURIComponent(symbol) + "&select=symbol,bid,ask,mid,spread,provider_timestamp,received_at,source,connection_status,latency_ms&limit=1");
+        return rows[0] || { error: "quote_not_found" };
+      });
+      return send(res, 200, quote);
     }
     if (url.pathname === "/api/scalping-backtest") {
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
@@ -1871,8 +1903,10 @@ const server = http.createServer(async (req, res) => {
       if (!(await verifyUserToken(bearer))) return send(res, 401, { error: "authentication_required" });
       const symbol = (url.searchParams.get("symbol") || "XAUUSD").toUpperCase();
       if (!symbols.includes(symbol)) return send(res, 400, { error: "unsupported_symbol" });
-      const rows = await db("aiva_backtest_runs?symbol=eq." + encodeURIComponent(symbol) +
-        "&select=id,symbol,method,data_points,first_tick_at,last_tick_at,train_boundary_at,overall,in_sample,out_of_sample,assumptions,warnings,trade_details,created_at&order=created_at.desc&limit=20");
+      const rows = await cachedApiResponse("backtest-history:" + symbol, 60000, () =>
+        db("aiva_backtest_runs?symbol=eq." + encodeURIComponent(symbol) +
+          "&select=id,symbol,method,data_points,first_tick_at,last_tick_at,train_boundary_at,overall,in_sample,out_of_sample,assumptions,warnings,trade_details,created_at&order=created_at.desc&limit=20")
+      );
       return send(res, 200, { symbol, runs: rows });
     }
     if (url.pathname === "/api/backtest") {
