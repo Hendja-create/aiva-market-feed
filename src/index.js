@@ -1969,12 +1969,19 @@ async function saveQuote(q) {
   // Keep the latest quote live on every provider update, but sample the
   // historical tick stream to avoid writing near-duplicate rows continuously.
   if (shouldPersistHistoricalTick(lastPersistedTickAt.get(symbol), now, tickMinIntervalMs)) {
-    await db("market_quote_ticks", {
-      method: "POST",
-      headers: { Prefer: "return=minimal" },
-      body: JSON.stringify({ symbol, bid, ask, mid: row.mid, spread: row.spread, provider_timestamp: row.provider_timestamp, received_at: row.received_at, source: "live-rates" })
-    });
+    // Reserve the sampling slot before awaiting the network request so
+    // concurrent quote callbacks for this symbol cannot write duplicate ticks.
     lastPersistedTickAt.set(symbol, now);
+    try {
+      await db("market_quote_ticks", {
+        method: "POST",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ symbol, bid, ask, mid: row.mid, spread: row.spread, provider_timestamp: row.provider_timestamp, received_at: row.received_at, source: "live-rates" })
+      });
+    } catch (error) {
+      if (lastPersistedTickAt.get(symbol) === now) lastPersistedTickAt.delete(symbol);
+      throw error;
+    }
   }
   received++; lastQuoteAt = row.received_at; lastError = null;
   if (received === 1 || received % 20 === 0) console.log("Quote stored", symbol, "bid", bid, "ask", ask, "latency", row.latency_ms);
