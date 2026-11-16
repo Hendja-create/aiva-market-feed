@@ -1,5 +1,6 @@
 import http from "node:http";
 import { io } from "socket.io-client";
+import { normalizeLiveRatesSymbol, mapLiveRatesSymbol } from "./live-rates-symbols.js";
 import { importDukascopyM1Chunk, importDukascopyM5Chunk } from "./dukascopy-history.js";
 import { runM1ScalpingBacktest } from "./scalping-backtest.js";
 import { runVolatilityReversalBacktest } from "./volatility-reversal-backtest.js";
@@ -24,6 +25,7 @@ for (const key of required) {
 const symbols = (process.env.SYMBOLS || "XAUUSD").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
 // Live quote subscriptions can be expanded without changing the strategy symbol set.
 const liveSymbols = [...new Set((process.env.LIVE_RATES_SYMBOLS || symbols.join(",")).split(",").map(s => s.trim().toUpperCase()).filter(Boolean))];
+const liveSymbolSet = new Set(liveSymbols.map(normalizeLiveRatesSymbol));
 // Historical M5 imports can run independently of the live quote subscription.
 const historicalM5Symbols = [...new Set((process.env.DUKASCOPY_M5_SYMBOLS || symbols.join(",")).split(",").map(s => s.trim().toUpperCase()).filter(Boolean))];
 const host = process.env.LIVE_RATES_SOCKET_HOST || "eu-wss.live-rates.com";
@@ -1940,9 +1942,9 @@ function num(value) {
   const n = Number(value); return Number.isFinite(n) ? n : null;
 }
 async function saveQuote(q) {
-  const providerSymbol = String(q.currency || q.symbol || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
-  if (!liveSymbols.includes(providerSymbol)) return;
-  const symbol = ({ SPX500: "SP500" })[providerSymbol] || providerSymbol;
+  const providerSymbol = normalizeLiveRatesSymbol(q.currency || q.symbol);
+  if (!liveSymbolSet.has(providerSymbol)) return;
+  const symbol = mapLiveRatesSymbol(providerSymbol);
   const bid = num(q.bid), ask = num(q.ask);
   if (!bid || !ask || bid <= 0 || ask < bid) { console.warn("Rejected invalid quote", symbol); return; }
   const rawTs = num(q.timestamp);
