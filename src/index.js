@@ -13,6 +13,7 @@ import { runStrategyAgent, getStrategyAgentReports } from "./strategy-agent.js";
 import { selectEligiblePaperStrategy } from "./strategy-eligibility.js";
 import { generateSelectedStrategySignal } from "./strategy-signal.js";
 import { getMarketFeedHealth, getM1ImportRetryDelayMs, shouldReconnectMarketFeed } from "./market-feed-health.js";
+import { shouldPersistHistoricalTick } from "./quote-sampling.js";
 
 const required = ["LIVE_RATES_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLISHABLE_KEY"];
 for (const key of required) {
@@ -26,6 +27,8 @@ const symbols = (process.env.SYMBOLS || "XAUUSD").split(",").map(s => s.trim().t
 // Live quote subscriptions can be expanded without changing the strategy symbol set.
 const liveSymbols = [...new Set((process.env.LIVE_RATES_SYMBOLS || symbols.join(",")).split(",").map(s => s.trim().toUpperCase()).filter(Boolean))];
 const liveSymbolSet = new Set(liveSymbols.map(normalizeLiveRatesSymbol));
+const tickMinIntervalMs = Math.max(1000, Math.min(60000, Number(process.env.MARKET_TICK_MIN_INTERVAL_MS || 5000)));
+const lastPersistedTickAt = new Map();
 // Historical M5 imports can run independently of the live quote subscription.
 const historicalM5Symbols = [...new Set((process.env.DUKASCOPY_M5_SYMBOLS || symbols.join(",")).split(",").map(s => s.trim().toUpperCase()).filter(Boolean))];
 const host = process.env.LIVE_RATES_SOCKET_HOST || "eu-wss.live-rates.com";
@@ -1963,11 +1966,16 @@ async function saveQuote(q) {
     headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
     body: JSON.stringify(row)
   });
-  await db("market_quote_ticks", {
-    method: "POST",
-    headers: { Prefer: "return=minimal" },
-    body: JSON.stringify({ symbol, bid, ask, mid: row.mid, spread: row.spread, provider_timestamp: row.provider_timestamp, received_at: row.received_at, source: "live-rates" })
-  });
+  // Keep the latest quote live on every provider update, but sample the
+  // historical tick stream to avoid writing near-duplicate rows continuously.
+  if (shouldPersistHistoricalTick(lastPersistedTickAt.get(symbol), now, tickMinIntervalMs)) {
+    await db("market_quote_ticks", {
+      method: "POST",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({ symbol, bid, ask, mid: row.mid, spread: row.spread, provider_timestamp: row.provider_timestamp, received_at: row.received_at, source: "live-rates" })
+    });
+    lastPersistedTickAt.set(symbol, now);
+  }
   received++; lastQuoteAt = row.received_at; lastError = null;
   if (received === 1 || received % 20 === 0) console.log("Quote stored", symbol, "bid", bid, "ask", ask, "latency", row.latency_ms);
 }
