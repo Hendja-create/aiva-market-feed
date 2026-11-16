@@ -1622,7 +1622,7 @@ const server = http.createServer(async (req, res) => {
           last_cycle_at: null,
           last_decision: null
         };
-        return send(res, 200, {
+        return {
           ...state,
           latest_analysis: latestAnalysis ? {
             id: latestAnalysis.id,
