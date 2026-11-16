@@ -27,7 +27,10 @@ const symbols = (process.env.SYMBOLS || "XAUUSD").split(",").map(s => s.trim().t
 // Live quote subscriptions can be expanded without changing the strategy symbol set.
 const liveSymbols = [...new Set((process.env.LIVE_RATES_SYMBOLS || symbols.join(",")).split(",").map(s => s.trim().toUpperCase()).filter(Boolean))];
 const liveSymbolSet = new Set(liveSymbols.map(normalizeLiveRatesSymbol));
-const tickMinIntervalMs = Math.max(1000, Math.min(60000, Number(process.env.MARKET_TICK_MIN_INTERVAL_MS || 5000)));
+const requestedTickMinIntervalMs = Number(process.env.MARKET_TICK_MIN_INTERVAL_MS || 5000);
+const tickMinIntervalMs = Number.isFinite(requestedTickMinIntervalMs)
+  ? Math.max(1000, Math.min(60000, requestedTickMinIntervalMs))
+  : 5000;
 const lastPersistedTickAt = new Map();
 // Historical M5 imports can run independently of the live quote subscription.
 const historicalM5Symbols = [...new Set((process.env.DUKASCOPY_M5_SYMBOLS || symbols.join(",")).split(",").map(s => s.trim().toUpperCase()).filter(Boolean))];
